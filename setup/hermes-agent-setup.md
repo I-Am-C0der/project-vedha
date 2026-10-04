@@ -120,13 +120,53 @@ Stage 5         Stage 6        Stage 7
 
 **10. `docker_run_as_host_user: true` has known compatibility implications in older Hermes Docker paths.** An upstream issue documents bundled skills failing when the container runs as a non-root user but Hermes home is still mounted under `/root`. The v0.21.5 baseline therefore keeps `docker_run_as_host_user: false` for predictable bundled-skill behavior. The trade-off is possible root ownership of files created in a bind-mounted workspace; Stage 3 shows how to handle that safely. Do not blindly flip the setting without testing skills that use Hermes-home files.
 
-**11. Cron and state persistence deserve extra verification on WSL2.** Upstream reports in the v0.21.x era cover cron scheduling failures, state-database races/corruption after repeated timeouts, and `state.db-wal` problems after WSL kernel changes. These are reported/version-specific issues, not proof that every v0.21.5 installation will fail. This guide responds by keeping scheduled work bounded, using a Linux filesystem for `~/.hermes`, avoiding cross-VM/network filesystems, testing restart recovery, and backing up before updates.
+**11. Cron and state persistence deserve extra verification on WSL2.** Upstream reports in the v0.21.x era cover cron scheduling failures, state-database races/corruption after repeated timeouts, and `state.db-wal` problems after WSL kernel changes. These are reported/version-specific issues, not proof that every v0.21.5 installation will fail. This guide responds by keeping scheduled work bounded, using the requested F: project filesystem for `$HERMES_HOME`, with explicit SQLite/WAL validation on `/mnt/f`, testing restart recovery, and backing up before updates.
 
 **12. Treat `hermes update` as a change operation.** Recent update-related reports include deferred gateway restarts, interrupted update flows, and gateway/cron processes that can remain on old code until the fleet is explicitly caught up. Back up first; after updating, run `hermes doctor`, `hermes config check`, `hermes cron status`, `hermes gateway status`, and the relevant end-to-end smoke tests before returning to unattended use.
 
+## Project Vedha Storage Root — Mandatory
+
+This build uses a single storage root exactly as requested: **`F:/project-vedha`** on Windows, mounted in WSL2 as **`/mnt/f/project-vedha`**. All Hermes-owned persistent state and every Project Vedha runtime asset in this guide stays beneath that root.
+
+```text
+Windows root: F:/project-vedha
+WSL root:     /mnt/f/project-vedha
+
+Hermes home:  F:/project-vedha/hermes
+WSL:          /mnt/f/project-vedha/hermes
+Workspace:    F:/project-vedha/workspace
+Source:       F:/project-vedha/source/hermes-agent-v2026.9.24
+Runtime:      F:/project-vedha/runtime/hermes-v0.21.5
+Services:     F:/project-vedha/services
+Backups:      F:/project-vedha/backups
+Temp:         F:/project-vedha/tmp
+Docker data:  F:/project-vedha/docker-desktop-data  (Docker Desktop managed VM disk location)
+```
+
+The pinned Hermes runtime supports the `HERMES_HOME` environment variable for relocating its profile/configuration root. This guide sets it to `/mnt/f/project-vedha/hermes`.
+
+After Step 1.7b has created the environment file, all shell commands below assume it has been sourced:
+
+```bash
+source /mnt/f/project-vedha/vedha-env.sh
+
+test "${VEDHA_ROOT}" = "/mnt/f/project-vedha"
+test "${HERMES_HOME}" = "/mnt/f/project-vedha/hermes"
+test "${VEDHA_WORKSPACE}" = "/mnt/f/project-vedha/workspace"
+test "${VEDHA_TMP}" = "/mnt/f/project-vedha/tmp"
+printf 'VEDHA_ROOT=%s\nHERMES_HOME=%s\nVEDHA_WORKSPACE=%s\n' \
+  "$VEDHA_ROOT" "$HERMES_HOME" "$VEDHA_WORKSPACE"
+```
+
+> **F: drive trade-off:** `/mnt/f` is a Windows/DrvFS filesystem. This satisfies the single-root requirement, but it can behave differently from the native Linux filesystem for SQLite/WAL, file locking, and high-churn I/O. The guide therefore adds an explicit filesystem smoke test before enabling unattended operation. Do not silently relocate Hermes back to `~/.hermes`; that would break the Project Vedha storage invariant.
+
+### Host-integration exceptions
+
+A few items are controlled by the operating system and cannot literally be stored under `F:/project-vedha`: Windows `.wslconfig`, the WSL user's shell profile, systemd's user-registration directory, and Windows Task Scheduler metadata. Docker Desktop also stores its Linux VM data in a managed disk image; this guide places that disk image under `F:/project-vedha/docker-desktop-data` through Docker Desktop's Settings → Resources → Advanced → Disk image location. These are host integration/managed-storage points; the actual Hermes content and Project Vedha runtime files remain under the root. The actual Hermes content, runtime, source, workspace, scripts, logs, service definitions, and backups remain under `F:/project-vedha`.
+
 ## Day-of-Install Pre-Flight
 
-Run this short check from WSL2 before starting a fresh implementation, after a major Windows/WSL/Docker change, or after a Hermes update. It is a fast gate, not a substitute for the stage-specific tests.
+Run this short check from WSL2 **after Step 1.7b has created the Project Vedha environment file**, before enabling the later stages, and again after a major Windows/WSL/Docker change or Hermes update. It is a fast gate, not a substitute for the stage-specific tests.
 
 ```bash
 #!/usr/bin/env bash
@@ -137,10 +177,10 @@ hermes --version
 hermes doctor
 hermes config check
 
-if [[ -z "${OPENROUTER_API_KEY:-}" && -f "$HOME/.hermes/.env" ]]; then
+if [[ -z "${OPENROUTER_API_KEY:-}" && -f "$HERMES_HOME/.env" ]]; then
   set -a
   # shellcheck disable=SC1090
-  source "$HOME/.hermes/.env"
+  source "$HERMES_HOME/.env"
   set +a
 fi
 
@@ -253,7 +293,7 @@ Reopen Ubuntu and verify:
 ```bash
 ps -p 1 -o comm=
 ```
-Expected: `systemd`. Keep Hermes state and workspace under the Linux filesystem (`~/...`) rather than `/mnt/c/...` for more predictable file locking and I/O.
+Expected: `systemd`. Keep Hermes state and workspace under the requested F: root (`F:/project-vedha`, WSL `/mnt/f/project-vedha`). Because this is a Windows-mounted filesystem, validate SQLite/WAL and file-locking behavior before enabling unattended work.
 
 > 💡 If you plan the Ryzen 7600X3D / 64GB RAM / RTX 5060 Ti upgrade mentioned in Appendix E, that setup uses `memory=24GB`, `processors=10` — more relaxed limits, since there's far more headroom to share. Don't apply that config to your current hardware; it will starve Windows.
 
@@ -266,12 +306,16 @@ sudo apt update && sudo apt upgrade -y
 1. Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
 2. Install with defaults — "Use WSL2 instead of Hyper-V" should already be checked on Windows 11
 3. Docker Desktop → Settings → Resources → WSL Integration → enable your Ubuntu distro → Apply & Restart
+4. Docker Desktop → Settings → Resources → Advanced → set **Disk image location** to `F:\project-vedha\docker-desktop-data` and apply. Docker documents this as the location for the Linux volume where containers/images are stored; do not move the disk image manually in File Explorer.
 
 **1.6 — Verify Docker works inside WSL2**
 ```bash
 docker --version
 docker run hello-world
+test -d /mnt/f/project-vedha
+test -d /mnt/f/project-vedha/docker-desktop-data
 ```
+The Docker Desktop Linux VM/image storage is managed by Docker; the setting above keeps that managed disk on F: while Hermes-owned configuration/state remains in `F:/project-vedha/hermes`.
 
 **1.7 — Verify GPU passthrough into containers (needed later for voice, Stage 12)**
 ```bash
@@ -281,7 +325,7 @@ This should print your GTX 1660 Super and driver version from inside the contain
 
 If this fails, stop and fix it now — Stage 12 (voice) cannot work without this, and it's much easier to diagnose with nothing else running yet.
 
-**1.7a — Verify Hermes installer prerequisites**
+**1.7a — Verify Hermes installation prerequisites**
 ```bash
 git --version
 curl --version
@@ -299,62 +343,102 @@ If `uv` is missing and you intend to use Step 1.8b, install `uv` using its curre
 
 Current Hermes Linux installation documentation lists Git, and on Linux also `curl` and `xz-utils`, as prerequisites.
 
-**1.8 — Install the Hermes Agent**
+**1.7b — Establish the Project Vedha storage root**
+Create the single root and the canonical environment file before installing Hermes. The first shell starts with the literal WSL path because `vedha-env.sh` does not exist yet.
+
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-source ~/.bashrc
-hermes --version
-hermes doctor
-# Stop here if the installed version is not the version this guide is pinned to.
-# The installer is rolling; exact release reproduction requires a release/tag or commit pin.
-# Do not mix files from one Hermes release with another release's config assumptions.
+export VEDHA_ROOT="/mnt/f/project-vedha"
+mkdir -p "$VEDHA_ROOT" "$VEDHA_ROOT/bin" "$VEDHA_ROOT/hermes" \
+  "$VEDHA_ROOT/workspace" "$VEDHA_ROOT/source" "$VEDHA_ROOT/runtime" \
+  "$VEDHA_ROOT/services/systemd/user" "$VEDHA_ROOT/services/windows" "$VEDHA_ROOT/backups" "$VEDHA_ROOT/tmp"
+
+cat > "$VEDHA_ROOT/vedha-env.sh" <<'EOF'
+export VEDHA_ROOT="/mnt/f/project-vedha"
+export HERMES_HOME="$VEDHA_ROOT/hermes"
+export VEDHA_WORKSPACE="$VEDHA_ROOT/workspace"
+export VEDHA_SOURCE="$VEDHA_ROOT/source/hermes-agent-v2026.9.24"
+export VEDHA_RUNTIME="$VEDHA_ROOT/runtime/hermes-v0.21.5"
+export VEDHA_SERVICES="$VEDHA_ROOT/services/systemd/user"
+export VEDHA_WINDOWS_SERVICES="$VEDHA_ROOT/services/windows"
+export VEDHA_BACKUPS="$VEDHA_ROOT/backups"
+export VEDHA_TMP="$VEDHA_ROOT/tmp"
+export TMPDIR="$VEDHA_TMP"
+export PATH="$VEDHA_ROOT/bin:$VEDHA_RUNTIME/bin:$PATH"
+EOF
+chmod 700 "$VEDHA_ROOT/vedha-env.sh"
+source "$VEDHA_ROOT/vedha-env.sh"
+
+# Keep the Project Vedha environment loaded in new WSL login shells. This is only a host
+# integration line; all actual Hermes files remain under F:/project-vedha.
+if ! grep -qxF 'source /mnt/f/project-vedha/vedha-env.sh' "$HOME/.profile" 2>/dev/null; then
+  printf '\n# Project Vedha Hermes environment\nsource /mnt/f/project-vedha/vedha-env.sh\n' >> "$HOME/.profile"
+fi
 ```
-This uses Hermes's managed installer. Treat the resulting version as the source of truth for the installed runtime. Do not manually assume a system Python version, site-packages location, or checkout revision; confirm them with `hermes --version`, `hermes doctor`, and the installed files before adding extra dependencies.
+
+**1.8 — Install the Hermes Agent inside `F:/project-vedha`**
+Do not use the rolling managed installer for this Project Vedha layout. It can place runtime assets under the default user home. Use the exact release-pinned source installation below so the Hermes runtime, source checkout, wrapper, and persistent Hermes state remain under the F: root.
 
 **1.8a — Freeze the baseline before continuing**
-The official installer is intentionally rolling. For this guide, the validated target is **v0.21.5 (`v2026.9.24`)**. Record what you actually installed: `hermes --version`. If you need byte-for-byte reproducibility, use the official release/tag installation path or pin the checkout to the validated tag/commit instead of trusting `main`.
+The validated target is **v0.21.5 (`v2026.9.24`)**. The tag requires Python 3.11–3.13. Do not rebuild this environment on Python 3.14 merely because a future Hermes release may support it.
 
-The official v0.21.5 release is the snapshot targeted by this guide, but the standard installer is rolling and does not guarantee that historical tag. The v0.21.5 tag requires Python 3.11–3.13. The managed installer provisions the Hermes runtime; do not substitute the host system Python version for release validation. If `hermes --version` does not report the guide target, stop and use the release/tag-specific installation procedure appropriate to that release before continuing.
+**1.8b — Exact v0.21.5 / `v2026.9.24` source-pinned installation**
 
-**1.8b — Exact v0.21.5 / `v2026.9.24` source-pinned installation (reproducibility path)**
-
-Use this path when you need the guide's exact historical release rather than whatever the rolling installer currently serves. The official release tag is `v2026.9.24` and the tagged commit is `f97608f178d1ffeca59860195ab7da295f7c8e5f`. Hermes's current installer supports `--commit`, but because the installer itself is rolling, the most transparent reproducibility path is a tag-pinned source checkout using Hermes's documented manual-install layout:
+The official release tag is `v2026.9.24` and the tagged commit is `f97608f178d1ffeca59860195ab7da295f7c8e5f`.
 
 ```bash
-cd ~
+source /mnt/f/project-vedha/vedha-env.sh
 
-git clone https://github.com/NousResearch/hermes-agent.git ~/.hermes/hermes-agent-v2026.9.24
-cd ~/.hermes/hermes-agent-v2026.9.24
+mkdir -p "$VEDHA_ROOT/source" "$VEDHA_ROOT/runtime" "$VEDHA_ROOT/hermes" \
+  "$VEDHA_ROOT/workspace" "$VEDHA_ROOT/services/systemd/user" "$VEDHA_ROOT/services/windows" \
+  "$VEDHA_ROOT/backups" "$VEDHA_ROOT/bin"
+
+# Remove a stale checkout only if it is known to be disposable; do not delete a live working tree.
+if [[ -e "$VEDHA_SOURCE" ]]; then
+  echo "ERROR: $VEDHA_SOURCE already exists. Reuse it only if it is the validated v2026.9.24 checkout." >&2
+  exit 1
+fi
+
+git clone https://github.com/NousResearch/hermes-agent.git "$VEDHA_SOURCE"
+cd "$VEDHA_SOURCE"
 git checkout v2026.9.24
 
-# Keep the runtime venv outside the source tree so an agent operating in the checkout
-# cannot accidentally delete its own Hermes runtime.
 command -v uv >/dev/null 2>&1 || {
   echo "ERROR: uv is required for the source-pinned installation path." >&2
-  echo "Install uv using its current official installation method, then rerun this step." >&2
   exit 1
 }
 uv --version
 
-uv venv ~/.hermes/venvs/hermes-v0.21.5 --python 3.11
-export VIRTUAL_ENV="$HOME/.hermes/venvs/hermes-v0.21.5"
-export PATH="$VIRTUAL_ENV/bin:$PATH"
+uv venv "$VEDHA_RUNTIME" --python 3.11
+export VIRTUAL_ENV="$VEDHA_RUNTIME"
+export PATH="$VEDHA_ROOT/bin:$VIRTUAL_ENV/bin:$PATH"
 uv pip install -e ".[all]"
 
-# Persist the Hermes executable for future shells. The absolute symlink target means
-# future sessions do not need VIRTUAL_ENV to be exported first.
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$VIRTUAL_ENV/bin/hermes" "$HOME/.local/bin/hermes"
-if ! grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.profile" 2>/dev/null; then
-  printf '\n# Hermes Agent source-pinned install\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.profile"
-fi
-export PATH="$HOME/.local/bin:$PATH"
+# Project Vedha wrapper: every Hermes invocation forces the requested HERMES_HOME.
+cat > "$VEDHA_ROOT/bin/hermes" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export VEDHA_ROOT="/mnt/f/project-vedha"
+export HERMES_HOME="$VEDHA_ROOT/hermes"
+export VEDHA_WORKSPACE="$VEDHA_ROOT/workspace"
+export VEDHA_SOURCE="$VEDHA_ROOT/source/hermes-agent-v2026.9.24"
+export VEDHA_RUNTIME="$VEDHA_ROOT/runtime/hermes-v0.21.5"
+export VEDHA_SERVICES="$VEDHA_ROOT/services/systemd/user"
+export VEDHA_WINDOWS_SERVICES="$VEDHA_ROOT/services/windows"
+export VEDHA_BACKUPS="$VEDHA_ROOT/backups"
+export VEDHA_TMP="$VEDHA_ROOT/tmp"
+export TMPDIR="$VEDHA_TMP"
+exec "$VEDHA_RUNTIME/bin/hermes" "$@"
+EOF
+chmod 700 "$VEDHA_ROOT/bin/hermes"
 
 # Confirm the exact checkout and runtime.
-git -C ~/.hermes/hermes-agent-v2026.9.24 rev-parse HEAD
+git -C "$VEDHA_SOURCE" rev-parse HEAD
 hermes --version
 hermes doctor
+hermes config check
 ```
+
+
 
 Expected commit:
 
@@ -362,7 +446,7 @@ Expected commit:
 f97608f178d1ffeca59860195ab7da295f7c8e5f
 ```
 
-This is an **optional reproducibility path**, not a requirement to abandon the managed installer. For the normal build, use the managed installer, record the resulting version, and stop if it differs from the validated target. Current Hermes documentation also documents checking out a specific release tag and reinstalling the editable package when rolling back or reproducing a release.
+The Project Vedha installation path above is the canonical path for this guide. Do not fall back to a managed install under `~/.hermes` or `~/.local/bin`; that would violate the storage-root requirement.
 
 **1.9 — Install voice-adjacent system packages now (used in Stage 12, cheap to do while you're here)**
 ```bash
@@ -372,7 +456,7 @@ sudo apt install -y ffmpeg portaudio19-dev libopus0 espeak-ng zip unzip
 ### Configuration Changes
 - New file: `C:\Users\[WINDOWS_USERNAME]\.wslconfig`
 - New: Docker Desktop installation, WSL2 integration enabled
-- New: `~/.hermes/` directory tree created by the installer (config.yaml, .env, SOUL.md, memories/, skills/ — all still empty/default at this point)
+- New: `$HERMES_HOME/` directory tree created under `F:/project-vedha/hermes` by the root-contained Project Vedha bootstrap
 
 ### Verification / Testing
 ```bash
@@ -388,7 +472,7 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi
 - No API keys, no `.env` entries, no config.yaml customization yet
 
 ### Troubleshooting
-- **`hermes: command not found`** — `~/.local/bin` isn't on PATH: `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc`. If you previously ran the installer with `sudo`, that's the actual cause — see the Dos and Don'ts below before re-running.
+- **`hermes: command not found`** — `$VEDHA_ROOT/bin` isn't on PATH: `source /mnt/f/project-vedha/vedha-env.sh`. If you previously ran the installer with `sudo`, that's the actual cause — see the Dos and Don'ts below before re-running.
 - **`docker: command not found` inside WSL2** — `wsl --shutdown` from PowerShell, reopen Ubuntu, confirm WSL Integration is still enabled in Docker Desktop settings
 - **GPU passthrough test fails with "could not select device driver"** — confirm Docker Desktop is on a reasonably current version; GPU support in the WSL2 backend needs it. Update Docker Desktop and retry before assuming a deeper problem.
 
@@ -400,7 +484,7 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi
 - **Don't** skip the GPU passthrough verification even if you don't plan to reach Stage 12 soon — confirming it early means Stage 12 is a pure voice-pipeline problem if something goes wrong, not a "is this even the platform's fault" question
 
 ### Rollback / Recovery
-Nothing in this stage is expected to modify user project data. For Hermes recovery, first capture `hermes dump`, `hermes doctor`, and a copy of `~/.hermes/config.yaml`/`.env` metadata; remove only the broken install components that the current installer documents. **Do not use `rm -rf ~/.hermes` as the first recovery step** because that directory contains configuration, memory, skills, sessions, and secrets. If WSL2 itself is irreparably broken, `wsl --unregister Ubuntu` remains a last-resort destructive recovery step and destroys the distro.
+Nothing in this stage is expected to modify user project data. For Hermes recovery, first capture `hermes dump`, `hermes doctor`, and a copy of `$HERMES_HOME/config.yaml`/`.env` metadata; remove only the broken install components that the current installer documents. **Do not use `rm -rf $HERMES_HOME` as the first recovery step** because that directory contains configuration, memory, skills, sessions, and secrets. If WSL2 itself is irreparably broken, `wsl --unregister Ubuntu` remains a last-resort destructive recovery step and destroys the distro.
 
 ### Completion Checklist
 ```
@@ -439,15 +523,15 @@ Neither model in this architecture has a free tier. Settings → Credits (add fu
 
 **2.3 — Add the key to Hermes**
 ```bash
-nano ~/.hermes/.env
+nano $HERMES_HOME/.env
 ```
 ```text
 # ⚠️ USER INPUT REQUIRED — paste the key from Step 2.1
 OPENROUTER_API_KEY=PASTE_REAL_KEY_HERE
 ```
 ```bash
-chmod 600 ~/.hermes/.env
-test "$(stat -c '%a' ~/.hermes/.env)" = "600"
+chmod 600 $HERMES_HOME/.env
+test "$(stat -c '%a' $HERMES_HOME/.env)" = "600"
 ```
 
 Do not use `PASTE_REAL_KEY_HERE` literally. Replace it with the actual OpenRouter key.
@@ -456,7 +540,7 @@ Do not use `PASTE_REAL_KEY_HERE` literally. Replace it with the actual OpenRoute
 ```bash
 set -a
 # shellcheck disable=SC1090
-source "$HOME/.hermes/.env"
+source "$HERMES_HOME/.env"
 set +a
 
 if ! curl -fsS \
@@ -471,7 +555,7 @@ This should return a match — OpenRouter currently lists CoreWeave as an endpoi
 
 **2.5 — Configure the primary model**
 ```bash
-nano ~/.hermes/config.yaml
+nano $HERMES_HOME/config.yaml
 ```
 ```yaml
 model:
@@ -510,8 +594,8 @@ hermes config check
 Do not run the interactive `hermes setup` wizard after deliberately hand-editing a release-pinned configuration unless you intend to let the wizard rewrite those choices. The CLI/config checks are the non-destructive validation path.
 
 ### Configuration Changes
-- `~/.hermes/.env` — `OPENROUTER_API_KEY` added
-- `~/.hermes/config.yaml` — `model:`, `agent:`, and `provider_routing:` blocks added
+- `$HERMES_HOME/.env` — `OPENROUTER_API_KEY` added
+- `$HERMES_HOME/config.yaml` — `model:`, `agent:`, and `provider_routing:` blocks added
 
 ### Verification / Testing
 **Authoritative checks first — these tell you what Hermes will actually use:**
@@ -695,15 +779,15 @@ Hermes manages capabilities primarily as **toolsets**. Start with the built-in f
 
 **3.2 — Create a dedicated workspace**
 ```bash
-mkdir -p ~/hermes-workspace
-cp ~/.hermes/config.yaml ~/.hermes/config.yaml.pre-stage3.bak
+mkdir -p $VEDHA_WORKSPACE
+cp $HERMES_HOME/config.yaml $HERMES_HOME/config.yaml.pre-stage3.bak
 ```
-Keep the workspace under the Linux filesystem. Do not use `/mnt/c/` for Hermes state or the primary agent workspace unless you have a specific reason and have tested SQLite, file locking, and performance on your WSL/Docker combination.
+The requested storage root is `F:/project-vedha` (WSL `/mnt/f/project-vedha`). Keep Hermes state and the agent workspace there. This is intentionally a DrvFS/NTFS deployment rather than the native Linux filesystem, so validate SQLite/WAL, locking, and high-churn I/O before enabling unattended work.
 
 **3.3 — Configure the Docker terminal backend**
 Use this baseline for the **v0.21.5 tag**.
 
-> ⚠️ **MERGE — DO NOT REPLACE `~/.hermes/config.yaml`.** The YAML below is a configuration fragment. Merge its `terminal:`, `checkpoints:`, and `approvals:` keys into the existing file from Stage 2, preserving the earlier `model:`, `agent:`, `provider_routing:`, and any other deliberate keys. Run `hermes config check` after the merge.
+> ⚠️ **MERGE — DO NOT REPLACE `$HERMES_HOME/config.yaml`.** The YAML below is a configuration fragment. Merge its `terminal:`, `checkpoints:`, and `approvals:` keys into the existing file from Stage 2, preserving the earlier `model:`, `agent:`, `provider_routing:`, and any other deliberate keys. Run `hermes config check` after the merge.
 
 ```yaml
 terminal:
@@ -713,7 +797,7 @@ terminal:
   home_mode: auto
   docker_image: "nousresearch/hermes-sandbox:desktop"   # Tag for bootstrap; record a digest after validation
   docker_volumes:
-    - "/home/[LINUX_USERNAME]/hermes-workspace:/workspace"
+    - "/mnt/f/project-vedha/workspace:/workspace"
   docker_run_as_host_user: false
   container_persistent: true
   docker_persist_across_processes: false
@@ -736,7 +820,7 @@ approvals:
   destructive_slash_confirm: true
   denial_breaker_threshold: 3
 ```
-`[LINUX_USERNAME]` is the WSL username from `whoami`.
+The host workspace bind mount is the literal Project Vedha WSL path `/mnt/f/project-vedha/workspace`.
 
 Why the baseline differs from older drafts:
 
@@ -749,13 +833,13 @@ Why the baseline differs from older drafts:
 **3.4 — Protect secrets and host boundaries**
 Never mount or forward these casually:
 ```text
-/mnt/c/
-~/.ssh/
-~/.aws/
-~/.kube/
-~/.netrc
+Windows credential/profile directories
+WSL `~/.ssh/`
+WSL `~/.aws/`
+WSL `~/.kube/`
+WSL `~/.netrc`
 browser credential/profile directories
-~/.hermes/.env
+$HERMES_HOME/.env
 other credential stores
 ```
 Hermes supports controlled environment forwarding, but anything visible inside the container should be treated as available to code executed there. Use the minimum secret required by the target tool and prefer read-only credential mounts when a supported integration provides one.
@@ -778,32 +862,32 @@ Because this v0.21.5 baseline runs Docker commands as root, files created throug
 
 Inspect after any coding task that creates or modifies host-visible files:
 ```bash
-find "$HOME/hermes-workspace" -maxdepth 2 -user root -ls | head -50
+find "$VEDHA_WORKSPACE" -maxdepth 2 -user root -ls | head -50
 ```
 
 Repair ownership for this dedicated agent workspace before normal host editing resumes:
 ```bash
-sudo chown -R "$USER:$USER" "$HOME/hermes-workspace"
+sudo chown -R "$USER:$USER" "$VEDHA_WORKSPACE"
 ```
 
 For convenience, install a small repair helper once:
 ```bash
-cat > "$HOME/.hermes/scripts/repair-workspace-ownership.sh" <<'EOF'
+cat > "$HERMES_HOME/scripts/repair-workspace-ownership.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-sudo chown -R "$USER:$USER" "$HOME/hermes-workspace"
+sudo chown -R "$USER:$USER" "$VEDHA_WORKSPACE"
 EOF
-chmod 700 "$HOME/.hermes/scripts/repair-workspace-ownership.sh"
+chmod 700 "$HERMES_HOME/scripts/repair-workspace-ownership.sh"
 ```
 
 Run it after any task that leaves root-owned files:
 ```bash
-"$HOME/.hermes/scripts/repair-workspace-ownership.sh"
+"$HERMES_HOME/scripts/repair-workspace-ownership.sh"
 ```
 Optional post-task hygiene when you know a coding session created host-visible files:
 ```bash
 # Run when root-owned files appear in the dedicated workspace:
-# "$HOME/.hermes/scripts/repair-workspace-ownership.sh"
+# "$HERMES_HOME/scripts/repair-workspace-ownership.sh"
 ```
 Do **not** mount your entire home directory and do **not** use `chmod -R 777` as a workaround.
 
@@ -832,7 +916,7 @@ test -n "$CONTAINER_NAME" || {
 docker exec "$CONTAINER_NAME" \
   sh -lc 'ls -l /workspace/test.txt && cat /workspace/test.txt'
 
-ls -l "$HOME/hermes-workspace/test.txt"
+ls -l "$VEDHA_WORKSPACE/test.txt"
 ```
 
 Capture the immutable image digest after the test so the validated container image can be pinned for reproducible rebuilds:
@@ -850,8 +934,8 @@ Do not substitute a fresh `docker run ...` mount test for inspection of the actu
 The commands in Step 3.7 are the authoritative smoke test for the Docker execution boundary. Record the resolved container name and image digest before continuing.
 
 ### Configuration Changes
-- `~/.hermes/config.yaml` — `terminal:`, `checkpoints:`, `approvals:`
-- `~/hermes-workspace/` — dedicated writable project area
+- `$HERMES_HOME/config.yaml` — `terminal:`, `checkpoints:`, `approvals:`
+- `$VEDHA_WORKSPACE/` — dedicated writable project area
 - No secrets are placed in the Docker container by this stage
 
 ### Expected Result
@@ -871,7 +955,7 @@ The commands in Step 3.7 are the authoritative smoke test for the Docker executi
 ### Completion Checklist
 ```text
 [ ] Toolsets reviewed with `hermes tools`
-[ ] Dedicated `~/hermes-workspace` created on the Linux filesystem
+[ ] Dedicated `$VEDHA_WORKSPACE` created on the Linux filesystem
 [ ] Docker terminal backend enabled
 [ ] `docker_network: false`
 [ ] `docker_persist_across_processes: false` for the v0.21.5 baseline
@@ -929,8 +1013,8 @@ This matters concretely for Stage 7 (delegation): delegated children automatical
 **4.1 — Confirm built-in memory is already active (no activation step is required)**
 ```bash
 hermes status
-cat ~/.hermes/memories/MEMORY.md
-cat ~/.hermes/memories/USER.md
+cat $HERMES_HOME/memories/MEMORY.md
+cat $HERMES_HOME/memories/USER.md
 ```
 `MEMORY.md` is Hermes-managed and may initially be sparse. `USER.md` is also agent-maintained over time, but in this build you will seed it with the supplied profile below. Both files can be corrected manually when needed; changes are intended to be picked up by a fresh session.
 
@@ -944,8 +1028,8 @@ External memory remains optional. Do not make Veda's basic persistence dependent
 
 **4.3 — Install the supplied `USER.md` profile**
 ```bash
-mkdir -p ~/.hermes/memories
-nano ~/.hermes/memories/USER.md
+mkdir -p $HERMES_HOME/memories
+nano $HERMES_HOME/memories/USER.md
 ```
 Replace the file contents with the following canonical `USER.md`:
 
@@ -997,7 +1081,8 @@ Current environment:
 - WSL2
 - Docker Desktop
 - NVIDIA GTX 1660 Super 6GB
-- 16GB RAM- Intel i3-10105F
+- 16GB RAM
+- Intel i3-10105F
 
 Current architecture:
 
@@ -1011,8 +1096,8 @@ Current architecture:
 
 ## Environment / Pathing Context
 
-- Windows paths such as `C:\...` are host paths, not Linux shell paths.
-- In WSL2, Windows drives are normally accessed through paths such as `/mnt/c/...`.
+- `F:/project-vedha` / `F:\project-vedha` are Windows host paths. In WSL2, use `/mnt/f/project-vedha`.
+- In WSL2, this guide uses the F: drive as `/mnt/f/project-vedha`.
 - WSL2 paths and Docker container paths are different namespaces and must not be
   assumed to be interchangeable.
 - Docker paths must be taken from the actual container configuration, mounts, or
@@ -1083,7 +1168,7 @@ This replaces the earlier chat-based seed prompt. The supplied file already cont
 
 **4.4 — Install the supplied `SOUL.md` — Veda's identity and behavior**
 ```bash
-nano ~/.hermes/SOUL.md
+nano $HERMES_HOME/SOUL.md
 ```
 Replace the file contents with the following canonical `SOUL.md`:
 
@@ -1187,8 +1272,8 @@ Keep `SOUL.md` focused on identity, communication, research/memory philosophy, a
 
 **4.5 — Install the supplied workspace-level `AGENTS.md` — engineering conventions**
 ```bash
-mkdir -p ~/hermes-workspace
-nano ~/hermes-workspace/AGENTS.md
+mkdir -p $VEDHA_WORKSPACE
+nano $VEDHA_WORKSPACE/AGENTS.md
 ```
 Replace the file contents with the following canonical workspace-level `AGENTS.md`:
 
@@ -1265,7 +1350,7 @@ When working with Java projects:
 
 - Determine whether a command is running on Windows, inside WSL2, or inside a Docker
   container before using filesystem paths or platform-specific commands.
-- Never use a Windows path such as `C:\...` directly in a Linux shell.
+- Do not use `F:\project-vedha` directly in a Linux shell; use `/mnt/f/project-vedha`.
 - Never assume a WSL2 path exists inside a Docker container.
 - Never assume a Docker container path exists on the WSL2 host.
 - Use actual bind mounts, working directories, compose files, or container configuration
@@ -1469,10 +1554,10 @@ A task is complete when:
 For a specific repository, add a more-specific `AGENTS.md` inside that repository and keep the workspace-level file as the common baseline. Hermes discovers project context from the working directory and its directory chain; delegated children inherit the resolved project's context.
 
 ### Configuration Changes
-- `~/.hermes/memories/USER.md` — installed from the supplied canonical profile
-- `~/.hermes/SOUL.md` — installed from the supplied canonical Veda identity/behavior file
-- `~/hermes-workspace/AGENTS.md` — installed from the supplied canonical workspace-level engineering instructions
-- `~/.hermes/memories/MEMORY.md` — remains Hermes-managed and requires no manual activation
+- `$HERMES_HOME/memories/USER.md` — installed from the supplied canonical profile
+- `$HERMES_HOME/SOUL.md` — installed from the supplied canonical Veda identity/behavior file
+- `$VEDHA_WORKSPACE/AGENTS.md` — installed from the supplied canonical workspace-level engineering instructions
+- `$HERMES_HOME/memories/MEMORY.md` — remains Hermes-managed and requires no manual activation
 - (Optional) an external memory provider configured via `hermes memory setup`
 
 ### Verification / Testing
@@ -1483,9 +1568,9 @@ hermes memory status      # Shows "none" unless you did Step 4.2 — that's corr
 
 Verify the files themselves:
 ```bash
-test -s ~/.hermes/SOUL.md && echo "SOUL.md OK"
-test -s ~/.hermes/memories/USER.md && echo "USER.md OK"
-test -s ~/hermes-workspace/AGENTS.md && echo "workspace AGENTS.md OK"
+test -s $HERMES_HOME/SOUL.md && echo "SOUL.md OK"
+test -s $HERMES_HOME/memories/USER.md && echo "USER.md OK"
+test -s $VEDHA_WORKSPACE/AGENTS.md && echo "workspace AGENTS.md OK"
 ```
 
 Start a fresh Hermes session and test the user profile:
@@ -1505,8 +1590,8 @@ Also confirm personality against `SOUL.md` with a casual question, then confirm 
 - (If configured) the external provider shows as active in `hermes memory status`
 
 ### Troubleshooting
-- **`USER.md` facts aren't reflected in a fresh session** — verify the file exists at `~/.hermes/memories/USER.md`, inspect its contents, then start another fresh session rather than relying on an already-running session.
-- **Personality doesn't come through** — confirm `~/.hermes/SOUL.md` contains the supplied version and start a new session; do not assume editing the file retroactively changes an already-running session.
+- **`USER.md` facts aren't reflected in a fresh session** — verify the file exists at `$HERMES_HOME/memories/USER.md`, inspect its contents, then start another fresh session rather than relying on an already-running session.
+- **Personality doesn't come through** — confirm `$HERMES_HOME/SOUL.md` contains the supplied version and start a new session; do not assume editing the file retroactively changes an already-running session.
 - **Delegated coding work ignores engineering conventions** — confirm the task has a resolved workspace and that the workspace/project `AGENTS.md` is located inside the context chain Hermes can discover.
 - **Both built-in and an external provider seem to be fighting over memory writes** — `/tools disable memory` to let the external provider handle it exclusively (Step 4.2).
 - **External provider reports "not available"** — check that provider's own dependency and API-key requirements; built-in memory remains independent.
@@ -1526,9 +1611,9 @@ Also confirm personality against `SOUL.md` with a casual question, then confirm 
 ### Completion Checklist
 ```text
 [ ] Confirmed built-in memory (MEMORY.md/USER.md) is active with zero setup
-[ ] Supplied USER.md installed at ~/.hermes/memories/USER.md
-[ ] Supplied SOUL.md installed at ~/.hermes/SOUL.md
-[ ] Supplied workspace AGENTS.md installed at ~/hermes-workspace/AGENTS.md
+[ ] Supplied USER.md installed at $HERMES_HOME/memories/USER.md
+[ ] Supplied SOUL.md installed at $HERMES_HOME/SOUL.md
+[ ] Supplied workspace AGENTS.md installed at $VEDHA_WORKSPACE/AGENTS.md
 [ ] Fresh-session test confirms USER.md context is available
 [ ] Personality/tone visibly matches SOUL.md
 [ ] Delegated coding task can see the applicable AGENTS.md context
@@ -1562,7 +1647,7 @@ hermes doctor
 The backend may be auto-selected from available credentials if you have not explicitly selected one. For a stable deployment, choose a backend deliberately through `hermes tools` and record what `hermes config get web.backend` reports.
 
 **5.2 — Add credentials only when the selected backend requires them**
-Keep provider keys in `~/.hermes/.env`. Common examples in the current Hermes ecosystem include:
+Keep provider keys in `$HERMES_HOME/.env`. Common examples in the current Hermes ecosystem include:
 ```text
 TAVILY_API_KEY=...
 FIRECRAWL_API_KEY=...
@@ -1654,7 +1739,7 @@ Read both `SKILL.md` **and any bundled `scripts/`** before trusting a skill that
 **6.3 — Prefer built-in skills before community dependencies**
 Check:
 ```bash
-ls ~/.hermes/skills/
+ls $HERMES_HOME/skills/
 ```
 Hermes may already ship or manage useful built-in/agent-created skills. Do not install a community skill simply to reproduce a capability that the current release already provides.
 
@@ -1762,7 +1847,7 @@ Add DeepSeek V4.1 Flash as a **delegated coding/execution specialist** — not a
 ```bash
 set -a
 # shellcheck disable=SC1090
-source "$HOME/.hermes/.env"
+source "$HERMES_HOME/.env"
 set +a
 
 if ! curl -fsS \
@@ -1778,7 +1863,7 @@ fi
 > 💰 **You pay CoreWeave's rate, not the cheapest listed rate.** OpenRouter's page shows the same model priced very differently across providers (some far below CoreWeave's). Pinning means paying whatever your pinned provider charges. Treat pricing as volatile and provider-specific — check the model page immediately before budgeting, and use `/usage` (Stage 11) as your real number.
 
 **7.2 — Configure delegation and the provider pins**
-> ⚠️ **MERGE — DO NOT REPLACE `~/.hermes/config.yaml`.** Keep the existing Stage 2 GLM provider-routing entry. Add the `delegation:` block below and add only the DeepSeek model entry under the existing `provider_routing.models:` map. Preserve all unrelated keys and run `hermes config check` after the merge.
+> ⚠️ **MERGE — DO NOT REPLACE `$HERMES_HOME/config.yaml`.** Keep the existing Stage 2 GLM provider-routing entry. Add the `delegation:` block below and add only the DeepSeek model entry under the existing `provider_routing.models:` map. Preserve all unrelated keys and run `hermes config check` after the merge.
 ```yaml
 # MERGE into the existing config.yaml; this is not a whole-file replacement.
 delegation:
@@ -1859,7 +1944,7 @@ Delegated children receive a fresh context plus the relevant project context-fil
 **Exacto (provider quality-reordering) does nothing under this pin.** It reorders *multiple* eligible providers; with `only: [coreweave]` there is exactly one candidate, so there is nothing to reorder. Don't add `:exacto` to either model slug.
 
 ### Configuration Changes
-- `~/.hermes/config.yaml` — new `delegation:` block; `provider_routing.models` entry for DeepSeek (GLM's was added in Stage 2)
+- `$HERMES_HOME/config.yaml` — new `delegation:` block; `provider_routing.models` entry for DeepSeek (GLM's was added in Stage 2)
 - The delegation toolset enabled via `hermes tools`
 
 ### Verification / Testing
@@ -1877,11 +1962,11 @@ Delegate to your coding sub-agent: write a Python function that checks whether a
 string is a palindrome, save it to /workspace/palindrome.py, and write three test
 cases for it in /workspace/test_palindrome.py. Run the tests and report the result.
 ```
-Expect a "delegation started" acknowledgment now and the result as a separate message later. Confirm the files exist on the host (`ls ~/hermes-workspace/`) and the tests actually pass when you run them yourself.
+Expect a "delegation started" acknowledgment now and the result as a separate message later. Confirm the files exist on the host (`ls $VEDHA_WORKSPACE/`) and the tests actually pass when you run them yourself.
 
 **Confirm which model and provider actually served the delegated call — from evidence, not the model's self-description:**
 - The OpenRouter dashboard's **Activity** view for your account lists each request with the model and the provider that served it — you should see `deepseek/deepseek-v4.1-flash` served by **CoreWeave** for the child's calls (and `z-ai/glm-5.3-flash` via CoreWeave for the parent's).
-- The child's live transcript: `tail -f ~/.hermes/cache/delegation/live/<delegation_id>/task-<n>.log`
+- The child's live transcript: `tail -f $HERMES_HOME/cache/delegation/live/<delegation_id>/task-<n>.log`
 
 **Watch it run:** `/agents` (alias `/tasks`) — the interactive TUI overlay gives a live tree with per-branch cost/tokens and stop controls; in the classic CLI it prints a text summary, and **Ctrl+T** (or F6) opens the interactive roster.
 
@@ -1935,7 +2020,7 @@ Confirm `/agents` shows two child tasks, that both files exist, and that neither
 - **Don't** run parallel children against the same files under the Docker backend
 
 ### Rollback / Recovery
-**What's changing:** a new `delegation:` block, a `provider_routing.models` entry, and the delegation toolset. **Before changing:** `cp ~/.hermes/config.yaml ~/.hermes/config.yaml.bak`. **To revert:** remove the `delegation:` block and the DeepSeek `provider_routing` entry, and disable the delegation toolset — GLM continues exactly as at the end of Stage 6, since delegation is purely additive. **To verify earlier stages are intact:** re-run Stage 3's file test and Stage 5's search test; neither should be affected.
+**What's changing:** a new `delegation:` block, a `provider_routing.models` entry, and the delegation toolset. **Before changing:** `cp $HERMES_HOME/config.yaml $HERMES_HOME/config.yaml.bak`. **To revert:** remove the `delegation:` block and the DeepSeek `provider_routing` entry, and disable the delegation toolset — GLM continues exactly as at the end of Stage 6, since delegation is purely additive. **To verify earlier stages are intact:** re-run Stage 3's file test and Stage 5's search test; neither should be affected.
 
 ### Completion Checklist
 ```
@@ -1994,8 +2079,9 @@ hermes cron list
 ```
 After it fires:
 ```bash
-cat ~/hermes-workspace/cron-smoke-test.txt
+cat $VEDHA_WORKSPACE/cron-smoke-test.txt
 ```
+
 **8.3 — Only then add a recurring job**
 Example:
 ```bash
@@ -2022,16 +2108,16 @@ hermes cron create --help
 
 For a script-only job on v0.21.5, the supported shape is:
 ```bash
-cat > ~/.hermes/scripts/cron-health-smoke.sh <<'EOF'
+cat > $HERMES_HOME/scripts/cron-health-smoke.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'cron-script-pass %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 EOF
-chmod +x ~/.hermes/scripts/cron-health-smoke.sh
+chmod +x $HERMES_HOME/scripts/cron-health-smoke.sh
 
 hermes cron create \
   "in 5m" \
-  --script ~/.hermes/scripts/cron-health-smoke.sh \
+  --script $HERMES_HOME/scripts/cron-health-smoke.sh \
   --no-agent
 ```
 Do not use `--no-agent` without `--script`.
@@ -2117,7 +2203,7 @@ Message **@userinfobot** — it replies with your numeric ID.
 
 **9.3 — Add credentials**
 ```bash
-nano ~/.hermes/.env
+nano $HERMES_HOME/.env
 ```
 ```bash
 TELEGRAM_BOT_TOKEN=[TELEGRAM_BOT_TOKEN]
@@ -2141,24 +2227,51 @@ hermes gateway start      # Starts it as a managed background service
 
 **9.6 — Make it survive restarts**
 
-Try Hermes's own service installer first:
-```bash
-hermes gateway install    # Installs a systemd user service on Linux/WSL2, launchd on macOS
-```
-⚠️ **Do not assume systemd persistence until you have tested it on this WSL2 installation.** WSL2 supports systemd, and Hermes can install a user service, but persistence across `wsl --shutdown`, VM lifecycle events, and Windows restarts should be treated as a deployment-specific property. Check whether `hermes gateway install` actually took effect (`systemctl --user status hermes-gateway` if available), then perform the real `wsl --shutdown` restart-survival test. If it does not recover reliably, use the Windows Task Scheduler bridge below:
+For the Project Vedha single-root layout, keep the actual gateway service unit under `F:/project-vedha/services/systemd/user` and register it with systemd through a symlink. This avoids putting the service definition itself under the default Hermes/user home.
 
-Create `start_hermes.bat` on your Desktop (replace `[WSL_DISTRO_NAME]` with the exact name from `wsl -l -q`):
-```batch
-wsl -d [WSL_DISTRO_NAME] -- bash -lc "export PATH="$HOME/.local/bin:$PATH"; command -v hermes >/dev/null 2>&1 || { echo 'ERROR: hermes not found on PATH' >&2; exit 127; }; exec hermes gateway run"
+```bash
+mkdir -p "$VEDHA_SERVICES" "$HOME/.config/systemd/user" "$VEDHA_WINDOWS_SERVICES"
+cat > "$VEDHA_SERVICES/hermes-gateway.service" <<'EOF'
+[Unit]
+Description=Hermes Gateway - Project Vedha
+After=default.target
+
+[Service]
+Environment=VEDHA_ROOT=/mnt/f/project-vedha
+Environment=HERMES_HOME=/mnt/f/project-vedha/hermes
+Environment=VEDHA_WORKSPACE=/mnt/f/project-vedha/workspace
+Environment=TMPDIR=/mnt/f/project-vedha/tmp
+WorkingDirectory=/mnt/f/project-vedha/workspace
+ExecStart=/mnt/f/project-vedha/bin/hermes gateway run --external-supervisor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+ln -sfn "$VEDHA_SERVICES/hermes-gateway.service" "$HOME/.config/systemd/user/hermes-gateway.service"
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-gateway.service
+systemctl --user status hermes-gateway.service
 ```
-Task Scheduler → Create Basic Task → Trigger: "When I log on" → Action: run this batch file. This works regardless of WSL2's systemd state, since it's Windows launching the WSL2 command directly rather than depending on a service manager inside the Linux VM.
+
+> **Do not also run `hermes gateway install` for this Project Vedha build.** That command is useful for a normal default-home installation, but this guide deliberately owns the unit file under `F:/project-vedha` and registers it as a symlink.
+
+Perform the real `wsl --shutdown` restart-survival test. If systemd does not recover the service reliably on your WSL2 installation, use the Windows Task Scheduler bridge below instead.
+
+Create `F:\project-vedha\services\windows\start_hermes_gateway.bat` (replace `[WSL_DISTRO_NAME]` with the exact name from `wsl -l -q`):
+```batch
+@echo off
+wsl -d [WSL_DISTRO_NAME] -- bash -lc "source /mnt/f/project-vedha/vedha-env.sh; command -v hermes >/dev/null 2>&1 || { echo 'ERROR: Project Vedha Hermes wrapper not found' >&2; exit 127; }; exec hermes gateway run --external-supervisor"
+```
+Task Scheduler → Create Basic Task → Trigger: "When I log on" → Action: run `F:\project-vedha\services\windows\start_hermes_gateway.bat`. This works regardless of WSL2's systemd state, since Windows launches the WSL command directly while all Project Vedha service/wrapper files remain on F:.
 
 **9.6a — Shared service-survival verification pattern**
 Use the same four-part pattern for every long-lived user service in this guide (Hermes gateway and the Stage 12 STT service): verify executable/PATH resolution, verify the unit is active, verify the service's real health endpoint or CLI response, then perform an actual `wsl --shutdown` restart and re-check without manually launching the service. For systemd-backed services, the minimal checks are:
 ```bash
 command -v hermes
 hermes --version
-systemctl --user is-active hermes-gateway 2>/dev/null || true
+systemctl --user is-active hermes-gateway.service 2>/dev/null || true
 ```
 The service-specific health check follows immediately afterward; the restart-survival test is the authoritative proof that the service survives the WSL lifecycle. The Task Scheduler fallback uses the same principle by checking `command -v hermes` inside the launched WSL shell before `exec hermes gateway run`.
 
@@ -2182,15 +2295,15 @@ gateway:
 ⚠️ Note the nesting: `gateway.platforms.telegram`, not a bare top-level `platforms:` — an earlier draft of this guide had this wrong.
 
 ### Configuration Changes
-- `~/.hermes/.env` — `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` added
-- `~/.hermes/config.yaml` — `terminal.cwd` set; optional `gateway.platforms.telegram` block
+- `$HERMES_HOME/.env` — `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS` added
+- `$HERMES_HOME/config.yaml` — `terminal.cwd` set; optional `gateway.platforms.telegram` block
 - New: a systemd user service (if `gateway install` worked) or a Task Scheduler entry (WSL2 fallback)
 
 ### Verification / Testing
 ```bash
 hermes gateway status    # Confirm running + Telegram connected
 ```
-Gateway log: `~/.hermes/logs/gateway.log`. Send a message to your bot from Telegram — expect a response within a few seconds. Test that the delegated coding model (Stage 7) and skills (Stage 6) still work through Telegram, not just CLI — the gateway is a different access path to the same underlying agent, and confirming that parity now avoids assuming it later.
+Gateway log: `$HERMES_HOME/logs/gateway.log`. Send a message to your bot from Telegram — expect a response within a few seconds. Test that the delegated coding model (Stage 7) and skills (Stage 6) still work through Telegram, not just CLI — the gateway is a different access path to the same underlying agent, and confirming that parity now avoids assuming it later.
 
 **Restart-survival test:** `wsl --shutdown` from PowerShell, reopen, wait a minute, message the bot again without touching anything manually.
 
@@ -2202,7 +2315,7 @@ Gateway log: `~/.hermes/logs/gateway.log`. Send a message to your bot from Teleg
 - Voice-message handling is tested separately in Stage 12 when local voice is enabled
 
 ### Troubleshooting
-- **Gateway starts, bot doesn't respond** — `hermes gateway status`; check `~/.hermes/logs/gateway.log`; load the token from `~/.hermes/.env` and test it with `curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"`; confirm `TELEGRAM_ALLOWED_USERS` matches your actual ID from @userinfobot; send `/start` to the bot if Telegram shows it as blocked
+- **Gateway starts, bot doesn't respond** — `hermes gateway status`; check `$HERMES_HOME/logs/gateway.log`; load the token from `$HERMES_HOME/.env` and test it with `curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"`; confirm `TELEGRAM_ALLOWED_USERS` matches your actual ID from @userinfobot; send `/start` to the bot if Telegram shows it as blocked
 - **Telegram noticeably costs more tokens than CLI for the same question** — check what `terminal.cwd` actually resolved to; a gateway accidentally launched from inside a project directory can pick up that project's `AGENTS.md` on every message. This is a real but not universal effect — verify it with `/usage` (Stage 11) on your own setup rather than assuming a fixed multiplier.
 - **Gateway doesn't survive a reboot** — confirm whether `hermes gateway install`'s systemd service actually persists across `wsl --shutdown` on your system; if not, use the Task Scheduler bridge (Step 9.6) instead of assuming a bare background process will survive
 
@@ -2302,7 +2415,7 @@ Message the bot on each newly-configured platform and confirm a response, the sa
 Any platform you've configured responds correctly, sharing the same memory, personality, and delegation capability as Telegram.
 
 ### Troubleshooting
-- **The platform never responds** — confirm the platform-specific token/app permissions, then run `hermes gateway status` and inspect `~/.hermes/logs/gateway.log` before changing model or tool settings.
+- **The platform never responds** — confirm the platform-specific token/app permissions, then run `hermes gateway status` and inspect `$HERMES_HOME/logs/gateway.log` before changing model or tool settings.
 - **Authentication works but messages are ignored** — verify the platform allowlist/pairing policy; the gateway defaults to denying unknown senders.
 - **WhatsApp breaks after reconnecting the QR session** — treat the integration as experimental; remove and reconfigure it rather than weakening the production Telegram security policy.
 
@@ -2331,7 +2444,7 @@ Put production-like guardrails around cost, latency, memory, logging, provider r
 
 **11.1 — Make approval behavior explicit for unattended execution**
 
-> ⚠️ **MERGE — DO NOT REPLACE `~/.hermes/config.yaml`.** All YAML fragments in Stage 11 extend the configuration built by earlier stages. Preserve existing model, terminal, delegation, gateway, memory, and other deliberate keys; add or update only the keys explicitly shown, then run `hermes config check`.
+> ⚠️ **MERGE — DO NOT REPLACE `$HERMES_HOME/config.yaml`.** All YAML fragments in Stage 11 extend the configuration built by earlier stages. Preserve existing model, terminal, delegation, gateway, memory, and other deliberate keys; add or update only the keys explicitly shown, then run `hermes config check`.
 
 ```yaml
 # MERGE into the existing config.yaml; preserve all unrelated keys.
@@ -2536,7 +2649,7 @@ hermes logs --tail 100
 
 Then run the auxiliary-route audit before declaring the CoreWeave-only policy complete:
 ```text
-For every auxiliary LLM key that is enabled in `~/.hermes/config.yaml`, force one real request through that feature's normal trigger path.
+For every auxiliary LLM key that is enabled in `$HERMES_HOME/config.yaml`, force one real request through that feature's normal trigger path.
 Confirm the OpenRouter Activity entry shows the intended model and provider=CoreWeave.
 Record PASS in the corresponding Appendix J ledger row.
 If a feature cannot be deterministically triggered during this run, disable it or record NOT TRIGGERED; do not mark the overall CoreWeave-only audit complete.
@@ -2621,26 +2734,26 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi
 Do not install the voice stack into Hermes's managed runtime.
 ```bash
 uv --version
-uv venv --python 3.11 ~/.hermes/voice-venv
+uv venv --python 3.11 $HERMES_HOME/voice-venv
 ```
 If the installed v0.21.5 environment does not expose `uv`, install/activate it using Astral's current official method rather than copying an old installer command from this guide.
 
 Install the current faster-whisper/CTranslate2 user-space CUDA dependencies and service dependencies:
 ```bash
-uv pip install --python ~/.hermes/voice-venv/bin/python \
+uv pip install --python $HERMES_HOME/voice-venv/bin/python \
   "faster-whisper==1.2.1" fastapi uvicorn requests \
   nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 
-uv pip freeze --python ~/.hermes/voice-venv/bin/python \
-  > ~/.hermes/voice-requirements.lock.txt
+uv pip freeze --python $HERMES_HOME/voice-venv/bin/python \
+  > $HERMES_HOME/voice-requirements.lock.txt
 ```
 Current faster-whisper documentation for the CUDA 12 path requires cuBLAS and cuDNN 9. A successful package installation is not sufficient; the first real GPU model load is the compatibility test.
 
 **12.3 — Build the persistent local STT service**
 Create:
 ```bash
-mkdir -p ~/.hermes/scripts ~/.hermes/logs
-nano ~/.hermes/scripts/distil-whisper-server.py
+mkdir -p $HERMES_HOME/scripts $HERMES_HOME/logs
+nano $HERMES_HOME/scripts/distil-whisper-server.py
 ```
 Use:
 ```python
@@ -2708,22 +2821,22 @@ if __name__ == "__main__":
 ```
 Create the launcher:
 ```bash
-nano ~/.hermes/scripts/start-distil-whisper.sh
+nano $HERMES_HOME/scripts/start-distil-whisper.sh
 ```
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-PY="$HOME/.hermes/voice-venv/bin/python"
+PY="$HERMES_HOME/voice-venv/bin/python"
 export LD_LIBRARY_PATH="$($PY -c 'import os; import nvidia.cublas.lib; import nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$PY" "$HOME/.hermes/scripts/distil-whisper-server.py"
+exec "$PY" "$HERMES_HOME/scripts/distil-whisper-server.py"
 ```
 ```bash
-chmod +x ~/.hermes/scripts/start-distil-whisper.sh
+chmod +x $HERMES_HOME/scripts/start-distil-whisper.sh
 ```
 
 Run the server once in the foreground. The first model load is the real CUDA test:
 ```bash
-~/.hermes/scripts/start-distil-whisper.sh
+$HERMES_HOME/scripts/start-distil-whisper.sh
 ```
 Then, in another shell:
 ```bash
@@ -2733,24 +2846,26 @@ nvidia-smi
 Stop with Ctrl+C after a successful load.
 
 **12.4 — Run STT as a user systemd service**
+The real unit file lives under `F:/project-vedha/services/systemd/user`. systemd's `~/.config/systemd/user` is only the required host registration point and contains a symlink; the authoritative unit file remains under `F:/project-vedha/services/systemd/user`.
 ```bash
-mkdir -p ~/.config/systemd/user
-nano ~/.config/systemd/user/hermes-stt.service
-```
-```ini
+mkdir -p "$VEDHA_SERVICES" "$HOME/.config/systemd/user"
+cat > "$VEDHA_SERVICES/hermes-stt.service" <<'EOF'
 [Unit]
 Description=Hermes Distil-Whisper STT service
 After=default.target
 
 [Service]
-ExecStart=%h/.hermes/scripts/start-distil-whisper.sh
+Environment=VEDHA_ROOT=/mnt/f/project-vedha
+Environment=HERMES_HOME=/mnt/f/project-vedha/hermes
+Environment=TMPDIR=/mnt/f/project-vedha/tmp
+ExecStart=/mnt/f/project-vedha/hermes/scripts/start-distil-whisper.sh
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
-```
-```bash
+EOF
+ln -sfn "$VEDHA_SERVICES/hermes-stt.service" "$HOME/.config/systemd/user/hermes-stt.service"
 systemctl --user daemon-reload
 systemctl --user enable --now hermes-stt.service
 systemctl --user status hermes-stt.service
@@ -2763,7 +2878,7 @@ If WSL2 systemd is not available or does not survive your restart test, use the 
 **12.5 — Test the STT client**
 Create:
 ```bash
-nano ~/.hermes/scripts/distil-whisper-stt-client.py
+nano $HERMES_HOME/scripts/distil-whisper-stt-client.py
 ```
 ```python
 #!/usr/bin/env python3
@@ -2798,26 +2913,26 @@ if "text" not in payload:
 out_path.write_text(payload["text"], encoding="utf-8")
 ```
 ```bash
-chmod +x ~/.hermes/scripts/distil-whisper-stt-client.py
+chmod +x $HERMES_HOME/scripts/distil-whisper-stt-client.py
 ```
 
 Run a non-destructive STT client smoke test before continuing:
 ```bash
 espeak-ng \
-  -w /tmp/hermes-stt-smoke.wav \
+  -w $VEDHA_TMP/hermes-stt-smoke.wav \
   "Hermes local speech recognition smoke test"
 
-~/.hermes/voice-venv/bin/python \
-  ~/.hermes/scripts/distil-whisper-stt-client.py \
-  /tmp/hermes-stt-smoke.wav \
-  /tmp/hermes-stt-smoke.txt
+$HERMES_HOME/voice-venv/bin/python \
+  $HERMES_HOME/scripts/distil-whisper-stt-client.py \
+  $VEDHA_TMP/hermes-stt-smoke.wav \
+  $VEDHA_TMP/hermes-stt-smoke.txt
 
-test -s /tmp/hermes-stt-smoke.txt
+test -s $VEDHA_TMP/hermes-stt-smoke.txt
 
 echo "Recognized text:"
-cat /tmp/hermes-stt-smoke.txt
+cat $VEDHA_TMP/hermes-stt-smoke.txt
 
-rm -f /tmp/hermes-stt-smoke.wav /tmp/hermes-stt-smoke.txt
+rm -f $VEDHA_TMP/hermes-stt-smoke.wav $VEDHA_TMP/hermes-stt-smoke.txt
 ```
 
 **12.6 — Run Kokoro-FastAPI locally**
@@ -2835,8 +2950,8 @@ Verify:
 curl http://127.0.0.1:8880/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{"model":"kokoro","input":"Testing one two three.","voice":"af_heart","response_format":"wav"}' \
-  --output /tmp/kokoro-test.wav
-file /tmp/kokoro-test.wav
+  --output $VEDHA_TMP/kokoro-test.wav
+file $VEDHA_TMP/kokoro-test.wav
 ```
 Play it locally with any audio player available on the WSL/Windows side. Do not publish port 8880 to the LAN/WAN.
 
@@ -2855,9 +2970,8 @@ stt:
   providers:
     distil-whisper:
       type: command
-      # Hermes v0.21.5 executes command providers through a shell. `$(whoami)` is therefore
-      # resolved at execution time, avoiding a stale hard-coded WSL username in long-lived config.
-      command: "/home/$(whoami)/.hermes/voice-venv/bin/python /home/$(whoami)/.hermes/scripts/distil-whisper-stt-client.py {input_path} {output_path}"
+      # Use the canonical Project Vedha paths directly; do not reintroduce a home-directory or username placeholder.
+      command: "/mnt/f/project-vedha/hermes/voice-venv/bin/python /mnt/f/project-vedha/hermes/scripts/distil-whisper-stt-client.py {input_path} {output_path}"
       format: txt
       language: "en"
       timeout: 300
@@ -2963,7 +3077,7 @@ Perform this sequence from a clean post-restart state:
 
 ```text
 [ ] 1. Start a new CLI/TUI session and verify the primary model/provider resolution.
-[ ] 2. Make a real file change in ~/hermes-workspace through Hermes and verify it on the host.
+[ ] 2. Make a real file change in $VEDHA_WORKSPACE through Hermes and verify it on the host.
 [ ] 3. Perform a current web search and cite its source.
 [ ] 4. Use one installed skill or MCP integration that you actually plan to keep.
 [ ] 5. Delegate a bounded coding task; verify the child result and OpenRouter Activity shows
@@ -2995,7 +3109,8 @@ Perform this sequence from a clean post-restart state:
 ```text
 [ ] Real file-write/read tool call succeeds
 [ ] Docker terminal is `backend=docker`, network locked by default
-[ ] Workspace is the only deliberate writable host project mount[ ] Approval behavior blocks unattended/destructive actions as designed
+[ ] Workspace is the only deliberate writable host project mount
+[ ] Approval behavior blocks unattended/destructive actions as designed
 ```
 
 **Automation / gateway**
@@ -3016,7 +3131,7 @@ Perform this sequence from a clean post-restart state:
 
 ### Backup
 
-Back up the entire `~/.hermes/` tree because it contains configuration, secrets, memory, skills, cron metadata, sessions, and Hermes state. Also record external runtime artifacts separately:
+Back up the entire `$HERMES_HOME/` tree because it contains configuration, secrets, memory, skills, cron metadata, sessions, and Hermes state. Also record external runtime artifacts separately:
 ```text
 Hermes release/tag + commit
 Kokoro-FastAPI image tag + digest
@@ -3030,18 +3145,20 @@ Before taking a consistent filesystem snapshot, stop the gateway and local servi
 hermes gateway stop || true
 systemctl --user stop hermes-stt.service || true
 ```
-Kokoro-FastAPI is **not part of the `~/.hermes` state tree in this baseline** and has no bind mount into the Hermes home, so it does not need to be stopped for consistency of this archive. Stop it only when you also want to quiesce GPU activity or capture a broader Docker-state snapshot.
+Kokoro-FastAPI is **not part of the `$HERMES_HOME` state tree in this baseline** and has no bind mount into the Hermes home, so it does not need to be stopped for consistency of this archive. Stop it only when you also want to quiesce GPU activity or capture a broader Docker-state snapshot.
 
-Create a private archive:
+Create a private archive inside the Project Vedha root, outside the live Hermes home:
 ```bash
-cd ~
+mkdir -p "$VEDHA_BACKUPS"
+ARCHIVE="$VEDHA_BACKUPS/hermes-home-$(date +%Y%m%d-%H%M%S).zip"
 umask 077
-zip -r hermes-home-$(date +%Y%m%d-%H%M%S).zip .hermes
-sha256sum hermes-home-*.zip
+cd "$VEDHA_ROOT"
+zip -rq "$ARCHIVE" hermes
+sha256sum "$ARCHIVE"
 ```
-Store the archive outside the live `~/.hermes` directory. Do not paste its contents into chat; it contains secrets.
+Store the archive under `F:/project-vedha/backups`, not inside the live `$HERMES_HOME` directory. Do not paste its contents into chat; it contains secrets.
 
-**Kokoro backup note:** the `kokoro` container used by this guide has no persistent bind mount into `~/.hermes`; its image/model state is an external runtime artifact recorded separately above. Therefore stopping Kokoro is **not required** to make the Hermes-home archive consistent. Stop it only when you intentionally want a full-stack cold-backup window or are separately snapshotting Docker volumes.
+**Kokoro backup note:** the `kokoro` container used by this guide has no persistent bind mount into `$HERMES_HOME`; its image/model state is an external runtime artifact recorded separately above. Therefore stopping Kokoro is **not required** to make the Hermes-home archive consistent. Stop it only when you intentionally want a full-stack cold-backup window or are separately snapshotting Docker volumes.
 
 For a future update, check the installed release's supported backup flags first:
 ```bash
@@ -3051,24 +3168,24 @@ When the installed release exposes `--backup`, use that supported option as an a
 
 ### Restore Drill (required before calling the installation reliable)
 
-Do this against a **disposable Hermes home**, never the live `~/.hermes`. The v0.21.5 runtime supports the `HERMES_HOME` environment variable for an alternate Hermes home.
+Do this against a **disposable Hermes home**, never the live `$HERMES_HOME`. The v0.21.5 runtime supports the `HERMES_HOME` environment variable for an alternate Hermes home; this guide keeps the disposable restore under the same Project Vedha root.
 
 ```bash
 set -euo pipefail
 
 ARCHIVE="$(
-  find "$HOME" -maxdepth 1 -type f -name 'hermes-home-*.zip' \
+  find "$VEDHA_BACKUPS" -maxdepth 1 -type f -name 'hermes-home-*.zip' \
     -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-
 )"
 
 test -n "$ARCHIVE"
 test -f "$ARCHIVE"
 
-RESTORE_ROOT="$(mktemp -d "$HOME/hermes-restore.XXXXXX")"
+RESTORE_ROOT="$(mktemp -d "$VEDHA_ROOT/restore.XXXXXX")"
 trap 'rm -rf -- "$RESTORE_ROOT"' EXIT
 
 unzip -q "$ARCHIVE" -d "$RESTORE_ROOT"
-RESTORED_HOME="$RESTORE_ROOT/.hermes"
+RESTORED_HOME="$RESTORE_ROOT/hermes"
 
 test -f "$RESTORED_HOME/config.yaml"
 test -f "$RESTORED_HOME/.env"
@@ -3088,9 +3205,9 @@ HERMES_HOME="$RESTORED_HOME" \
 
 Do **not** start the Telegram gateway or another remote-control service from the restored home. The restored `.env` contains the production Telegram token; running a second bot poller can interfere with the live gateway.
 
-Confirm external artifacts separately: Docker images, the voice virtual environment, STT model caches, and any other runtime assets outside `~/.hermes` must be recreatable from the recorded versions.
+Confirm external artifacts separately: Docker images, Docker Desktop storage, and any runtime assets outside `$HERMES_HOME` must be recreatable from the recorded versions. Project Vedha keeps all Hermes-side runtime/configuration files under `F:/project-vedha`; Docker Desktop image storage itself is managed by Docker and is not a normal Hermes file path.
 
-Do not overwrite the live `~/.hermes` directory simply to prove the archive can be restored.
+Do not overwrite the live `$HERMES_HOME` directory simply to prove the archive can be restored; the disposable restore must remain under `F:/project-vedha/restore.*`.
 
 ### Update Workflow
 
@@ -3167,7 +3284,7 @@ A local Ollama/VLM tier is an optional future architecture change, not part of t
 - Don't use the legacy `web.search_backend` / `web.extract_backend` schema in this guide.
 - Don't treat `hermes chat -q` on a real TTY as a one-shot command; use `--oneshot`/`-Q` when you need a command that exits.
 - Don't enable provider fallback if the requirement is truly CoreWeave-only.
-- Don't mount `/mnt/c`, `~/.ssh`, cloud credentials, browser profiles, or `.env` into the sandbox as a convenience.
+- Don't mount Windows credential/profile directories, WSL `~/.ssh`/`~/.aws`/`~/.kube` files, cloud credentials, browser profiles, or `.env` into the sandbox as a convenience.
 - Don't assume Docker isolation is a complete host-isolation guarantee when you have bind mounts.
 - Don't run parallel delegated children against the same files under the shared Docker workspace.
 - Don't add cloud STT/TTS keys to a local-only voice path just to satisfy a guessed configuration requirement.
@@ -3211,7 +3328,7 @@ docker logs "$CONTAINER_NAME" --tail 100
 For any changed image/mount/resource/network setting, verify the actual container configuration after recreating it.
 
 ### State / WSL2 issues
-Keep `~/.hermes` and the primary workspace on the Linux filesystem. If a WSL kernel or filesystem change is followed by `state.db`, WAL, or locking errors, stop unattended work, capture the logs, back up the Hermes home, and check whether the exact symptom matches current upstream state-database issues before attempting recovery.
+Keep `$HERMES_HOME` and the primary workspace under the requested F: root. Because this is `/mnt/f`, validate SQLite/WAL, locking, and I/O before unattended operation. If a WSL kernel or filesystem change is followed by `state.db`, WAL, or locking errors, stop unattended work, capture the logs, back up the Hermes home, and check whether the exact symptom matches current upstream state-database issues before attempting recovery.
 
 ### Voice issues
 Test the layers independently: CUDA visibility → faster-whisper import/model load → STT HTTP service → Kokoro HTTP synthesis → Hermes voice integration → Telegram voice delivery. Fix the lowest failing layer first.
@@ -3286,8 +3403,8 @@ hermes config get delegation
 hermes fallback list
 
 # Memory
-cat ~/.hermes/memories/MEMORY.md
-cat ~/.hermes/memories/USER.md
+cat $HERMES_HOME/memories/MEMORY.md
+cat $HERMES_HOME/memories/USER.md
 hermes memory status
 
 # Cron / gateway
@@ -3301,7 +3418,7 @@ hermes gateway stop
 curl http://127.0.0.1:8765/health
 curl http://127.0.0.1:8880/v1/audio/speech -H 'Content-Type: application/json' \
   -d '{"model":"kokoro","input":"hello","voice":"af_heart","response_format":"wav"}' \
-  --output /tmp/kokoro.wav
+  --output $VEDHA_TMP/kokoro.wav
 
 # Update
 hermes update --help
@@ -3310,16 +3427,16 @@ hermes update
 
 **Key files**
 ```text
-~/.hermes/config.yaml
-~/.hermes/.env
-~/.hermes/SOUL.md
-~/.hermes/memories/
-~/.hermes/skills/
-~/.hermes/cron/
-~/.hermes/state.db
-~/.hermes/scripts/
-~/.hermes/voice-venv/
-~/hermes-workspace/
+$HERMES_HOME/config.yaml
+$HERMES_HOME/.env
+$HERMES_HOME/SOUL.md
+$HERMES_HOME/memories/
+$HERMES_HOME/skills/
+$HERMES_HOME/cron/
+$HERMES_HOME/state.db
+$HERMES_HOME/scripts/
+$HERMES_HOME/voice-venv/
+$VEDHA_WORKSPACE/
 ```
 
 ## Appendix G — Bare-Metal Linux Installation (Alternative to Stage 1)
@@ -3385,7 +3502,7 @@ Never mount `.env` or credential stores into the coding sandbox unless the featu
 
 This is an **illustrative merged config for the architecture**, not a wholesale paste command. Build it through the stages and run `hermes config check` after each major change. Some optional blocks should remain absent unless their feature is enabled.
 
-> ⚠️ **MERGE-ONLY REFERENCE.** Never replace the whole `~/.hermes/config.yaml` with this appendix. Treat every top-level mapping shown here as a fragment to merge into your actual file, preserving existing keys that are not shown. The `RECORD_FROM_DOCKER_IMAGE_INSPECT` / `<RECORDED_DIGEST>` markers are placeholders only; replace them with the digest captured from the real validated container before using the reference as a completeness check.
+> ⚠️ **MERGE-ONLY REFERENCE.** Never replace the whole `$HERMES_HOME/config.yaml` with this appendix. Treat every top-level mapping shown here as a fragment to merge into your actual file, preserving existing keys that are not shown. The `RECORD_FROM_DOCKER_IMAGE_INSPECT` / `<RECORDED_DIGEST>` markers are placeholders only; replace them with the digest captured from the real validated container before using the reference as a completeness check.
 
 ### Known-good baseline shape for v0.21.5
 
@@ -3531,7 +3648,7 @@ terminal:
   timeout: 180
   docker_image: "nousresearch/hermes-sandbox:desktop@sha256:<RECORDED_DIGEST>"
   docker_volumes:
-    - "/home/[LINUX_USERNAME]/hermes-workspace:/workspace"
+    - "/mnt/f/project-vedha/workspace:/workspace"
   docker_run_as_host_user: false
   container_persistent: true
   docker_persist_across_processes: false
@@ -3598,7 +3715,7 @@ OpenRouter models:   z-ai/glm-5.3-flash
                     deepseek/deepseek-v4.1-flash
 Kokoro image:       v0.9.0-cu126 (record/pin digest after pull)
 STT model:          Systran/faster-distil-whisper-large-v3
-STT runtime:        separate ~/.hermes/voice-venv (Python 3.11 baseline)
+STT runtime:        separate $HERMES_HOME/voice-venv (Python 3.11 baseline)
 ```
 
 ### Version-drift procedure
@@ -3626,7 +3743,7 @@ Then re-run the relevant Stage 2/3/5/7/8/9/12 smoke tests.
 - **Docker mount/config path reports (#100444):** upstream reports showed configuration not always being reflected in live containers. This guide therefore verifies `docker inspect` on the actual container after creation/recreation.
 - **`docker_run_as_host_user` / Hermes-home compatibility (#34026):** reported against older Hermes Docker behavior; the documented workaround is image/path-specific. The v0.21.5 baseline stays root-running for predictable skill paths and explicitly documents the ownership trade-off.
 - **Cron/tool/memory behavior (#38129 and related reports):** cron may expose tools whose runtime behavior differs from interactive sessions. Treat unattended memory-dependent workflows as version-sensitive.
-- **WSL state/WAL reports (#110214 and related issues):** WSL kernel changes have coincided with state database/WAL failures in community reports. Keep Hermes state on the Linux filesystem and back up before kernel/Hermes changes.
+- **WSL state/WAL reports (#110214 and related issues):** WSL kernel changes have coincided with state database/WAL failures in community reports. Keep Hermes state under `F:/project-vedha/hermes` and back up before kernel/Hermes changes.
 - **Cron scheduler stall reports (#114309):** scheduler heartbeat failures have been reported on v0.21.3-era WSL2 deployments. Do not assume a healthy `cron list` means the scheduler will remain healthy after an upgrade; verify real execution.
 - **Gateway/update restart reports (#107402):** updates can defer or fail to restart a running gateway cleanly. A background-triggered update should use the current documented deferred-restart procedure.
 
@@ -3686,10 +3803,10 @@ Supporting model/voice sources:
 - https://github.com/remsky/Kokoro-FastAPI/releases/tag/v0.9.0
 
 ### Final implementation rule
-Treat this document as a **release-anchored procedure**, not a timeless compatibility guarantee. The current machine, installed Hermes release, provider availability, Docker runtime, WSL kernel, and third-party integrations remain the final authorities for execution.
+Treat this document as a **release-anchored procedure**, not a timeless compatibility guarantee. The current machine, installed Hermes release, provider availability, Docker runtime, WSL kernel, filesystem behavior, and third-party integrations remain the final authorities for execution. The Project Vedha storage invariant is `F:/project-vedha` (WSL `/mnt/f/project-vedha`).
 
 ### Post-audit corrections incorporated
-- Removed executable placeholder credentials from provider probes; probes now load `OPENROUTER_API_KEY` from `~/.hermes/.env`.
+- Removed executable placeholder credentials from provider probes; probes now load `OPENROUTER_API_KEY` from `$HERMES_HOME/.env`.
 - Added the missing Stage 3 dependency to Stage 4 and Stage 4 dependency to Stage 7.
 - Added gateway startup to Stage 8 before cron smoke tests.
 - Aligned the delegation parallel test with the configured two-child concurrency and one-shot limits.
@@ -3701,11 +3818,17 @@ Treat this document as a **release-anchored procedure**, not a timeless compatib
 - Added runtime image-digest capture and removed the misleading claim that a mutable image tag is reproducibly pinned.
 - Removed leaked citation artifacts from the release-pinned guide text.
 - Added explicit merge-not-replace instructions at the Stage 3, Stage 7, Stage 11, and Appendix J configuration boundaries.
-- Replaced the Stage 12 STT command's literal `[LINUX_USERNAME]` placeholder with a runtime-resolved `/home/$(whoami)` path.
+- Replaced the Stage 12 STT command path with the absolute Project Vedha path `/mnt/f/project-vedha/hermes/...` and moved temporary STT/Kokoro smoke artifacts under `/mnt/f/project-vedha/tmp`.
 - Added mandatory Stage 6 negative tool-surface verification using `hermes tools --summary` and `hermes tools list --platform cli`.
 - Added a per-enabled-auxiliary Activity-evidence gate before declaring the CoreWeave-only request surface complete.
 - Added explicit CoreWeave endpoint failure messages to the pre-flight and model/delegation probes.
 - Added shared service-survival verification guidance and an optional post-task workspace-ownership reminder.
+- Relocated the canonical Hermes home, workspace, source checkout, runtime venv, voice runtime, scripts, logs, service definitions, and backups to the single Project Vedha root `F:/project-vedha` (WSL `/mnt/f/project-vedha`).
+- Added `HERMES_HOME=/mnt/f/project-vedha/hermes` as the pinned v0.21.5 home override and a Project Vedha `hermes` wrapper so CLI invocations stay inside the requested root.
+- Changed the canonical install path so the Hermes runtime and executable remain under `F:/project-vedha` rather than `~/.local`.
+- Added a Project Vedha SQLite/filesystem smoke test because the requested root is a Windows-mounted F: filesystem.
+- Stored the real STT systemd unit under `F:/project-vedha/services/systemd/user`, using only the required `~/.config/systemd/user` symlink as the host registration point.
+- Moved Hermes backups and the disposable restore drill under `F:/project-vedha/backups` and `F:/project-vedha/restore.*`.
 
 ---
 
