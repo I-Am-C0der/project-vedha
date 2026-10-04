@@ -536,9 +536,14 @@ sudo apt install -y ffmpeg portaudio19-dev libopus0 espeak-ng zip unzip
 ```
 
 ### Configuration Changes
-- New file: `%USERPROFILE%\.wslconfig`
+- Canonical WSL config: `F:\project-vedha\host\wsl\.wslconfig`
+- Live WSL config required by Windows/WSL: `%USERPROFILE%\.wslconfig`
 - New: Docker Desktop installation, WSL2 integration enabled
-- New: `$HERMES_HOME/` directory tree created under `F:/project-vedha/hermes` by the root-contained Project Vedha bootstrap
+- New: `$HERMES_HOME/` directory tree created under `F:/project-vedha/hermes`
+- New: pinned Hermes source checkout under `F:/project-vedha/source/hermes-agent-v2026.9.24`
+- New: Hermes Python runtime under `F:/project-vedha/runtime/hermes-v0.21.5`
+- New: Project Vedha Hermes launcher at `F:/project-vedha/bin/hermes`
+- New: uv executable, managed Python, and uv cache under `F:/project-vedha`
 
 ### Verification / Testing
 ```bash
@@ -997,7 +1002,6 @@ test -n "$CONTAINER_NAME" || {
 
 docker exec "$CONTAINER_NAME" \
   sh -lc 'ls -l /workspace/test.txt && cat /workspace/test.txt'
-
 ls -l "$VEDHA_WORKSPACE/test.txt"
 ```
 
@@ -1997,8 +2001,7 @@ delegate_task(goal="Fix the error")
 # GOOD — the child has what it needs to work independently
 delegate_task(
     goal="Fix the TypeError in api/handlers.py",
-    context="Line 47: 'NoneType' object has no attribute 'get'. process_request() "
-            "receives a dict from parse_body(), which returns None when Content-Type "
+    context="Line 47: 'NoneType' object has no attribute 'get'. process_request() "            "receives a dict from parse_body(), which returns None when Content-Type "
             "is missing. Project at /workspace/myproject, Python 3.11."
 )
 ```
@@ -2997,8 +3000,7 @@ chmod +x $HERMES_HOME/scripts/distil-whisper-stt-client.py
 ```
 
 Run a non-destructive STT client smoke test before continuing:
-```bash
-espeak-ng \
+```bashespeak-ng \
   -w $VEDHA_TMP/hermes-stt-smoke.wav \
   "Hermes local speech recognition smoke test"
 
