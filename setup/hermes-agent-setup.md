@@ -102,9 +102,9 @@ Stage 5         Stage 6        Stage 7
 
 **1. Windows 11 native installation is supported, but this guide intentionally uses WSL2.** Hermes now documents native Windows installation with PowerShell as well as Linux/macOS/WSL2 installation. WSL2 remains the baseline here because the rest of this guide is built around a Linux userland, Docker Desktop's WSL2 backend, Linux systemd services, and the local faster-whisper service. Native Windows is a valid alternative, but it is a different deployment path and should not be mixed into the WSL-specific commands below.
 
-**2. The exact Hermes release matters.** The v0.21.5 source tree declares `requires-python >=3.11,<3.14`. Do not rebuild the v0.21.5 environment on Python 3.14 merely because a newer Hermes release may use it. The managed installer controls Hermes's runtime; for an exact historical reproduction use the tag-pinned path in Stage 1.
+**2. The exact Hermes release matters.** The v0.21.5 source tree declares `requires-python >=3.11,<3.14`. Do not rebuild the v0.21.5 environment on Python 3.14 merely because a newer Hermes release may use it. This guide uses the exact tagged source checkout `v2026.9.24` and provisions a dedicated Python 3.11 runtime under F:/project-vedha/runtime.
 
-**3. Keep Hermes installed as your normal WSL user.** Do not prepend `sudo` to the Hermes installer. A root install changes file ownership, PATH, service behavior, and where state is stored. If a previous installation was performed as root, identify it with `which hermes` before changing anything.
+**3. Keep Hermes installed as your normal WSL user.** Do not run the Hermes source-install block with `sudo`. A root install changes file ownership, PATH, service behavior, and where state is stored. All Hermes-owned persistent state remains under F:/project-vedha/hermes.
 
 **4. Built-in memory is always available.** Hermes's `MEMORY.md`/`USER.md` system is the baseline and needs no activation. External memory providers are additive and optional. Do not make the basic installation depend on Honcho, Hindsight, Mem0, OpenViking, or another external backend.
 
@@ -158,17 +158,21 @@ printf 'VEDHA_ROOT=%s\nHERMES_HOME=%s\nVEDHA_WORKSPACE=%s\n' \
   "$VEDHA_ROOT" "$HERMES_HOME" "$VEDHA_WORKSPACE"
 ```
 
-> **F: drive trade-off:** `/mnt/f` is a Windows/DrvFS filesystem. This satisfies the single-root requirement, but it can behave differently from the native Linux filesystem for SQLite/WAL, file locking, and high-churn I/O. The guide therefore adds an explicit filesystem smoke test before enabling unattended operation. Do not silently relocate Hermes back to `~/.hermes`; that would break the Project Vedha storage invariant.
+> **F: drive trade-off:** `/mnt/f` is a Windows/DrvFS filesystem. This satisfies the single-root requirement, but it can behave differently from the native Linux filesystem for SQLite/WAL, file locking, and high-churn I/O. The guide therefore adds an explicit filesystem smoke test before enabling unattended operation. Do not silently relocate Hermes back to the WSL user's default Hermes profile; that would break the Project Vedha storage invariant.
 
 ### Host-integration exceptions
 
-A few items are controlled by the operating system and cannot literally be stored under `F:/project-vedha`: Windows `.wslconfig`, the WSL user's shell profile, systemd's user-registration directory, and Windows Task Scheduler metadata. Docker Desktop also stores its Linux VM data in a managed disk image; this guide places that disk image under `F:/project-vedha/docker-desktop-data` through Docker Desktop's Settings → Resources → Advanced → Disk image location. These are host integration/managed-storage points; the actual Hermes content and Project Vedha runtime files remain under the root. The actual Hermes content, runtime, source, workspace, scripts, logs, service definitions, and backups remain under `F:/project-vedha`.
+A few items are controlled by the operating system and cannot literally be used from F:/project-vedha as their live runtime location: Windows .wslconfig, the WSL user's shell profile, systemd's user-registration directory, and Windows Task Scheduler metadata. For .wslconfig, the canonical source-of-truth is F:/project-vedha/host/wsl/.wslconfig, while the required live host copy is %USERPROFILE%\.wslconfig. Docker Desktop also stores its Linux VM data in a managed disk image; this guide places that disk image under `F:/project-vedha/docker-desktop-data` through Docker Desktop's Settings → Resources → Advanced → Disk image location. These are host integration/managed-storage points; the actual Hermes content and Project Vedha runtime files remain under the root. The actual Hermes content, runtime, source, workspace, scripts, logs, service definitions, and backups remain under `F:/project-vedha`.
 
 ## Day-of-Install Pre-Flight
 
-Run this short check from WSL2 **after Step 1.7b has created the Project Vedha environment file**, before enabling the later stages, and again after a major Windows/WSL/Docker change or Hermes update. It is a fast gate, not a substitute for the stage-specific tests.
+Run this short check from WSL2 **after Stage 1 is complete and `hermes --version` succeeds**, before enabling the later stages, and again after a major Windows/WSL/Docker change or Hermes update. It is a fast gate, not a substitute for the stage-specific tests.
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /mnt/f/project-vedha/vedha-env.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -241,10 +245,29 @@ wsl --update
 wsl --set-default-version 2
 ```
 
-**1.3 — Configure `.wslconfig` for your current hardware**
+**1.3 — Configure .wslconfig for your current hardware**
 
-Create `C:\Users\[WINDOWS_USERNAME]\.wslconfig`:
-```ini
+The canonical Project Vedha copy lives at:
+
+```
+F:\project-vedha\host\wsl\.wslconfig
+```
+
+WSL does not read the file from that location directly. Windows/WSL uses the live host copy at:
+
+```
+%USERPROFILE%\.wslconfig
+```
+
+Create the canonical file and deploy it from **PowerShell**:
+
+```powershell
+$vedhaRoot = 'F:\project-vedha'
+$canonicalWslConfig = Join-Path $vedhaRoot 'host\wsl\.wslconfig'
+
+New-Item -ItemType Directory -Force -Path (Split-Path $canonicalWslConfig) | Out-Null
+
+@'
 [wsl2]
 
 # Cap the WSL2 VM at 8 GB on the current 16 GB host.
@@ -264,11 +287,23 @@ swap=4GB
 
 # Keep explicit only on WSL builds that expose this experimental setting.
 autoMemoryReclaim=dropCache
+'@ | Set-Content -Path $canonicalWslConfig -Encoding ascii
+
+Copy-Item -LiteralPath $canonicalWslConfig -Destination (Join-Path $env:USERPROFILE '.wslconfig') -Force
+
+Write-Host "Canonical WSL config: $canonicalWslConfig"
+Write-Host "Live WSL config:       $env:USERPROFILE\.wslconfig"
 ```
-⚠️ **USER INPUT REQUIRED** — `[WINDOWS_USERNAME]`: run `echo %USERNAME%` in Command Prompt to find it.
+
+No [WINDOWS_USERNAME] substitution is required. PowerShell resolves the current Windows profile through `$env:USERPROFILE`.
+
+Whenever the canonical Project Vedha file changes, redeploy it with:
+
+```powershell
+Copy-Item -LiteralPath 'F:\project-vedha\host\wsl\.wslconfig' -Destination (Join-Path $env:USERPROFILE '.wslconfig') -Force
+```
 
 Restart WSL2 to apply: `wsl --shutdown` (from PowerShell), then reopen Ubuntu.
-
 **1.3a — Enable systemd in WSL2 (required for the preferred gateway/STT service path)**
 
 Create `/etc/wsl.conf` inside Ubuntu:
@@ -325,7 +360,7 @@ This should print your GTX 1660 Super and driver version from inside the contain
 
 If this fails, stop and fix it now — Stage 12 (voice) cannot work without this, and it's much easier to diagnose with nothing else running yet.
 
-**1.7a — Verify Hermes installation prerequisites**
+**1.7a — Verify base tools required by the pinned Hermes install**
 ```bash
 git --version
 curl --version
@@ -335,22 +370,19 @@ If any are missing:
 ```bash
 sudo apt install -y git curl xz-utils
 ```
-The exact source-pinned path in Step 1.8b also requires `uv`. Verify it before using that path:
-```bash
-uv --version
-```
-If `uv` is missing and you intend to use Step 1.8b, install `uv` using its current official installation method before continuing.
-
-Current Hermes Linux installation documentation lists Git, and on Linux also `curl` and `xz-utils`, as prerequisites.
+The exact source-pinned Hermes installation below also uses uv. Install uv in Step 1.7c so the uv executable, its managed Python installation, and cache all stay under Project Vedha.
 
 **1.7b — Establish the Project Vedha storage root**
-Create the single root and the canonical environment file before installing Hermes. The first shell starts with the literal WSL path because `vedha-env.sh` does not exist yet.
+Create the single root and the canonical environment file before installing Hermes. The first shell starts with the literal WSL path because vedha-env.sh does not exist yet.
 
 ```bash
 export VEDHA_ROOT="/mnt/f/project-vedha"
+
 mkdir -p "$VEDHA_ROOT" "$VEDHA_ROOT/bin" "$VEDHA_ROOT/hermes" \
   "$VEDHA_ROOT/workspace" "$VEDHA_ROOT/source" "$VEDHA_ROOT/runtime" \
-  "$VEDHA_ROOT/services/systemd/user" "$VEDHA_ROOT/services/windows" "$VEDHA_ROOT/backups" "$VEDHA_ROOT/tmp"
+  "$VEDHA_ROOT/runtime/uv-python" "$VEDHA_ROOT/services/systemd/user" \
+  "$VEDHA_ROOT/services/windows" "$VEDHA_ROOT/backups" "$VEDHA_ROOT/tmp" \
+  "$VEDHA_ROOT/tmp/uv-cache"
 
 cat > "$VEDHA_ROOT/vedha-env.sh" <<'EOF'
 export VEDHA_ROOT="/mnt/f/project-vedha"
@@ -362,61 +394,104 @@ export VEDHA_SERVICES="$VEDHA_ROOT/services/systemd/user"
 export VEDHA_WINDOWS_SERVICES="$VEDHA_ROOT/services/windows"
 export VEDHA_BACKUPS="$VEDHA_ROOT/backups"
 export VEDHA_TMP="$VEDHA_ROOT/tmp"
+
+# Keep uv itself, uv-managed Python, and uv cache inside Project Vedha.
+export UV_INSTALL_DIR="$VEDHA_ROOT/bin"
+export UV_PYTHON_INSTALL_DIR="$VEDHA_ROOT/runtime/uv-python"
+export UV_CACHE_DIR="$VEDHA_ROOT/tmp/uv-cache"
+
 export TMPDIR="$VEDHA_TMP"
 export PATH="$VEDHA_ROOT/bin:$VEDHA_RUNTIME/bin:$PATH"
 EOF
+
 chmod 700 "$VEDHA_ROOT/vedha-env.sh"
 source "$VEDHA_ROOT/vedha-env.sh"
 
-# Keep the Project Vedha environment loaded in new WSL login shells. This is only a host
-# integration line; all actual Hermes files remain under F:/project-vedha.
 if ! grep -qxF 'source /mnt/f/project-vedha/vedha-env.sh' "$HOME/.profile" 2>/dev/null; then
   printf '\n# Project Vedha Hermes environment\nsource /mnt/f/project-vedha/vedha-env.sh\n' >> "$HOME/.profile"
 fi
 ```
 
-**1.8 — Install the Hermes Agent inside `F:/project-vedha`**
-Do not use the rolling managed installer for this Project Vedha layout. It can place runtime assets under the default user home. Use the exact release-pinned source installation below so the Hermes runtime, source checkout, wrapper, and persistent Hermes state remain under the F: root.
-
-**1.8a — Freeze the baseline before continuing**
-The validated target is **v0.21.5 (`v2026.9.24`)**. The tag requires Python 3.11–3.13. Do not rebuild this environment on Python 3.14 merely because a future Hermes release may support it.
-
-**1.8b — Exact v0.21.5 / `v2026.9.24` source-pinned installation**
-
-The official release tag is `v2026.9.24` and the tagged commit is `f97608f178d1ffeca59860195ab7da295f7c8e5f`.
+**1.7c — Install uv inside Project Vedha**
+Use the official uv installer, but override its installation/storage locations so this build does not put uv under the WSL user's default local directories.
 
 ```bash
 source /mnt/f/project-vedha/vedha-env.sh
 
-mkdir -p "$VEDHA_ROOT/source" "$VEDHA_ROOT/runtime" "$VEDHA_ROOT/hermes" \
-  "$VEDHA_ROOT/workspace" "$VEDHA_ROOT/services/systemd/user" "$VEDHA_ROOT/services/windows" \
-  "$VEDHA_ROOT/backups" "$VEDHA_ROOT/bin"
+if [[ ! -x "$VEDHA_ROOT/bin/uv" ]]; then
+  curl -LsSf https://astral.sh/uv/install.sh \
+    | env UV_INSTALL_DIR="$VEDHA_ROOT/bin" UV_NO_MODIFY_PATH=1 sh
+fi
 
-# Remove a stale checkout only if it is known to be disposable; do not delete a live working tree.
+export PATH="$VEDHA_ROOT/bin:$PATH"
+
+command -v uv
+uv --version
+uv python dir
+uv cache dir
+
+test "$(uv python dir)" = "$VEDHA_ROOT/runtime/uv-python"
+test "$(uv cache dir)" = "$VEDHA_ROOT/tmp/uv-cache"
+```
+
+Astral documents UV_INSTALL_DIR for the executable location, UV_PYTHON_INSTALL_DIR for uv-managed Python installations, and UV_CACHE_DIR for the cache location. These overrides keep the uv toolchain under F:/project-vedha.**1.8 — Install the Hermes Agent (exact v0.21.5 / v2026.9.24 source-pinned build)**
+
+This is the actual Hermes installation step. After Steps 1.7a–1.7c, run the **entire Step 1.8b block once** from Ubuntu. Do not run it with sudo.
+
+The complete block clones the pinned release, creates the Python runtime, installs Hermes, creates the Project Vedha launcher, forces HERMES_HOME to the Project Vedha location, and performs the initial verification.
+
+**1.8a — Freeze the baseline before continuing**
+```
+Hermes version: v0.21.5
+Release tag:    v2026.9.24
+Commit:         f97608f178d1ffeca59860195ab7da295f7c8e5f
+Python:         3.11.x
+```
+Do not continue if the checkout or runtime does not match the values above.
+
+**1.8b — Complete Hermes installation + verification block**
+
+Yes: this is the whole installation. Run this block from start to finish. You do not need a second Hermes installer.
+
+```bash
+source /mnt/f/project-vedha/vedha-env.sh
+
+EXPECTED_HERMES_COMMIT="f97608f178d1ffeca59860195ab7da295f7c8e5f"
+
+mkdir -p "$VEDHA_ROOT/source" "$VEDHA_ROOT/runtime" "$HERMES_HOME" \
+  "$VEDHA_ROOT/workspace" "$VEDHA_ROOT/services/systemd/user" \
+  "$VEDHA_ROOT/services/windows" "$VEDHA_ROOT/backups" "$VEDHA_ROOT/bin"
+
 if [[ -e "$VEDHA_SOURCE" ]]; then
-  echo "ERROR: $VEDHA_SOURCE already exists. Reuse it only if it is the validated v2026.9.24 checkout." >&2
+  echo "ERROR: $VEDHA_SOURCE already exists." >&2
+  echo "Reuse it only after verifying it is the validated v2026.9.24 checkout." >&2
   exit 1
 fi
 
-git clone https://github.com/NousResearch/hermes-agent.git "$VEDHA_SOURCE"
-cd "$VEDHA_SOURCE"
-git checkout v2026.9.24
+git clone --branch v2026.9.24 --depth 1 \
+  https://github.com/NousResearch/hermes-agent.git "$VEDHA_SOURCE"
 
-command -v uv >/dev/null 2>&1 || {
-  echo "ERROR: uv is required for the source-pinned installation path." >&2
+cd "$VEDHA_SOURCE"
+
+ACTUAL_HERMES_COMMIT="$(git rev-parse HEAD)"
+if [[ "$ACTUAL_HERMES_COMMIT" != "$EXPECTED_HERMES_COMMIT" ]]; then
+  echo "ERROR: Hermes checkout commit mismatch." >&2
+  echo "Expected: $EXPECTED_HERMES_COMMIT" >&2
+  echo "Actual:   $ACTUAL_HERMES_COMMIT" >&2
   exit 1
-}
-uv --version
+fi
 
 uv venv "$VEDHA_RUNTIME" --python 3.11
+
 export VIRTUAL_ENV="$VEDHA_RUNTIME"
-export PATH="$VEDHA_ROOT/bin:$VIRTUAL_ENV/bin:$PATH"
+export PATH="$VEDHA_ROOT/bin:$VEDHA_RUNTIME/bin:$PATH"
+
 uv pip install -e ".[all]"
 
-# Project Vedha wrapper: every Hermes invocation forces the requested HERMES_HOME.
 cat > "$VEDHA_ROOT/bin/hermes" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
 export VEDHA_ROOT="/mnt/f/project-vedha"
 export HERMES_HOME="$VEDHA_ROOT/hermes"
 export VEDHA_WORKSPACE="$VEDHA_ROOT/workspace"
@@ -426,35 +501,42 @@ export VEDHA_SERVICES="$VEDHA_ROOT/services/systemd/user"
 export VEDHA_WINDOWS_SERVICES="$VEDHA_ROOT/services/windows"
 export VEDHA_BACKUPS="$VEDHA_ROOT/backups"
 export VEDHA_TMP="$VEDHA_ROOT/tmp"
+
+export UV_INSTALL_DIR="$VEDHA_ROOT/bin"
+export UV_PYTHON_INSTALL_DIR="$VEDHA_ROOT/runtime/uv-python"
+export UV_CACHE_DIR="$VEDHA_ROOT/tmp/uv-cache"
+
 export TMPDIR="$VEDHA_TMP"
+export PATH="$VEDHA_ROOT/bin:$VEDHA_RUNTIME/bin:$PATH"
+
 exec "$VEDHA_RUNTIME/bin/hermes" "$@"
 EOF
 chmod 700 "$VEDHA_ROOT/bin/hermes"
 
-# Confirm the exact checkout and runtime.
+command -v hermes
 git -C "$VEDHA_SOURCE" rev-parse HEAD
+"$VEDHA_RUNTIME/bin/python" --version
 hermes --version
 hermes doctor
 hermes config check
+
+test -d "$HERMES_HOME"
+printf 'HERMES_HOME=%s\nVEDHA_SOURCE=%s\nVEDHA_RUNTIME=%s\n' \
+  "$HERMES_HOME" "$VEDHA_SOURCE" "$VEDHA_RUNTIME"
 ```
 
-
-
 Expected commit:
-
-```text
+```
 f97608f178d1ffeca59860195ab7da295f7c8e5f
 ```
 
-The Project Vedha installation path above is the canonical path for this guide. Do not fall back to a managed install under `~/.hermes` or `~/.local/bin`; that would violate the storage-root requirement.
-
-**1.9 — Install voice-adjacent system packages now (used in Stage 12, cheap to do while you're here)**
+Important: Step 1.8b is the complete installation for the pinned build after Steps 1.7a–1.7c. Stop and troubleshoot if any command in the block fails; do not skip verification commands.**1.9 — Install voice-adjacent system packages now (used in Stage 12, cheap to do while you're here)**
 ```bash
 sudo apt install -y ffmpeg portaudio19-dev libopus0 espeak-ng zip unzip
 ```
 
 ### Configuration Changes
-- New file: `C:\Users\[WINDOWS_USERNAME]\.wslconfig`
+- New file: `%USERPROFILE%\.wslconfig`
 - New: Docker Desktop installation, WSL2 integration enabled
 - New: `$HERMES_HOME/` directory tree created under `F:/project-vedha/hermes` by the root-contained Project Vedha bootstrap
 
@@ -472,14 +554,14 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi
 - No API keys, no `.env` entries, no config.yaml customization yet
 
 ### Troubleshooting
-- **`hermes: command not found`** — `$VEDHA_ROOT/bin` isn't on PATH: `source /mnt/f/project-vedha/vedha-env.sh`. If you previously ran the installer with `sudo`, that's the actual cause — see the Dos and Don'ts below before re-running.
+- **`hermes: command not found`** — `$VEDHA_ROOT/bin` isn't on PATH: `source /mnt/f/project-vedha/vedha-env.sh`. Then verify `command -v hermes` points to `/mnt/f/project-vedha/bin/hermes`.
 - **`docker: command not found` inside WSL2** — `wsl --shutdown` from PowerShell, reopen Ubuntu, confirm WSL Integration is still enabled in Docker Desktop settings
 - **GPU passthrough test fails with "could not select device driver"** — confirm Docker Desktop is on a reasonably current version; GPU support in the WSL2 backend needs it. Update Docker Desktop and retry before assuming a deeper problem.
 
 ### Dos and Don'ts
 - **Do** run the GPU passthrough test now, even though nothing needs it yet — it's the cheapest point in the whole build to catch this
 - **Do** keep `.wslconfig` at the documented baseline of `memory=8GB`, `processors=4`, and `swap=4GB` on this hardware; raise the limits only if measurements show you need them
-- **Don't** mix a root-mode Hermes installation with this user-scoped WSL2 build. Use the standard non-root installer path described above and verify the active executable with `which hermes`.
+- **Don't** run the Hermes source-install block with `sudo`. The source tree, runtime, wrapper, and `$HERMES_HOME` must remain owned by your normal WSL user.
 - **Don't** install Ollama or any local LLM at this stage — this architecture's primary/delegated models are both cloud-based (Stage 2, Stage 7); local models are an optional future path (Appendix, "Local Ollama")
 - **Don't** skip the GPU passthrough verification even if you don't plan to reach Stage 12 soon — confirming it early means Stage 12 is a pure voice-pipeline problem if something goes wrong, not a "is this even the platform's fault" question
 
@@ -489,11 +571,11 @@ Nothing in this stage is expected to modify user project data. For Hermes recove
 ### Completion Checklist
 ```
 [ ] WSL2 installed and updated
-[ ] .wslconfig created with conservative limits for current hardware
+[ ] Canonical .wslconfig stored at F:\project-vedha\host\wsl\.wslconfig and deployed to %USERPROFILE%\.wslconfig
 [ ] Docker Desktop installed with WSL2 integration enabled
 [ ] docker run hello-world succeeds
 [ ] GPU passthrough test succeeds (nvidia-smi visible inside a container)
-[ ] Hermes installed — hermes --version works
+[ ] Hermes v0.21.5 installed from the pinned tag/commit — hermes --version works
 [ ] hermes doctor passes (with no model configured yet — expected)
 [ ] Voice-adjacent packages installed (ffmpeg, portaudio19-dev, espeak-ng)
 ```
@@ -998,7 +1080,6 @@ USER.md
 AGENTS.md
   Global engineering instructions for software work. More specific project-level AGENTS.md files
   can extend or refine these rules for individual repositories.
-
 MEMORY.md
   Hermes-managed long-term notes learned from conversations and tasks. Keep implementation-heavy
   project instructions in AGENTS.md or project documentation instead of filling personal memory.
@@ -1997,8 +2078,7 @@ Delegate two independent tasks in parallel, each writing to its own file:
 Confirm `/agents` shows two child tasks, that both files exist, and that neither task overwrote the other's file. This intentionally matches the configured `max_concurrent_children: 2` and `oneshot_max_children: 2` limits.
 
 ### Expected Result
-- The OpenRouter activity log shows delegated calls served by DeepSeek V4.1 Flash on CoreWeave
-- A real coding task delegated end-to-end produces correct, verifiable files
+- The OpenRouter activity log shows delegated calls served by DeepSeek V4.1 Flash on CoreWeave- A real coding task delegated end-to-end produces correct, verifiable files
 - A parallel batch runs without children colliding
 - You can explain the difference between delegation, provider pinning, and fallback
 
@@ -2997,8 +3077,7 @@ wake_word:
   sensitivity: 0.6
   confirmation_frames: 3
   start_new_session: true
-```
-Then:
+```Then:
 ```text
 /wake status
 /wake on
