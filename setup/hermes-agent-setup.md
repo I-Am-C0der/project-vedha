@@ -229,7 +229,7 @@ Do not paste PowerShell into Ubuntu or bash into PowerShell. The language tag on
 WINDOWS (F:)                                         PURPOSE
 F:\project-vedha\
 ├── wsl\Ubuntu\ext4.vhdx                             Ubuntu distro disk — contains /srv/vedha (all live state)
-├── docker-desktop-data\                             Docker Desktop managed disk (images, containers, volumes)
+├── DockerDesktopWSL\                             Docker Desktop managed disk (images, containers, volumes)
 ├── host\wsl\.wslconfig                              Canonical .wslconfig (deployed to %USERPROFILE%)
 ├── host\wsl\swap.vhdx                               WSL swap file
 ├── host\windows\                                    Exported Task Scheduler XML, PowerShell helpers
@@ -393,7 +393,7 @@ wsl --shutdown
 1. Download Docker Desktop for Windows from https://www.docker.com/products/docker-desktop/ and run the installer. Keep "Use WSL 2 instead of Hyper-V" checked. Sign-in to a Docker account is optional; you can skip it.
 2. Settings → General: **Use the WSL 2 based engine** ✔, **Start Docker Desktop when you sign in to your computer** ✔.
 3. Settings → Resources → WSL Integration: enable **Ubuntu** → Apply & Restart. (If you moved or imported the distro after first enabling this, toggle it off and on again.)
-4. Settings → Resources → Advanced → **Disk image location** = `F:\project-vedha\docker-desktop-data` → Apply. Let Docker move it; never move the disk image by hand.
+4. Settings → Resources → Advanced → **Disk image location** = `F:\project-vedha\DockerDesktopWSL` → Apply. Let Docker move it; never move the disk image by hand.
 
 **0.7 — 🪟 Windows GUI: Telegram account hardening (do it now, before you ever need it)**
 Telegram → Settings → Privacy and Security → **Two-Step Verification**: set a cloud password. Your Telegram account becomes a remote control for an agent that can run tools.
