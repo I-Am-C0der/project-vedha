@@ -607,7 +607,7 @@ ls -l "$D"
 # uv (official installer, redirected into the Vedha root).
 # Pin it: use the exact version validated for this guide [VERIFY row 29].
 # Do not leave this empty in the canonical build; an unpinned bootstrap weakens reproducibility.
-UV_VERSION="0.9.5"   # replace only after recording the validated version in Appendix J
+UV_VERSION="0.12.23"   # replace only after recording the validated version in Appendix J
 curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR="$VEDHA_ROOT/tools/bin" UV_NO_MODIFY_PATH=1 sh
 uv --version
 uv python dir     # expected: /srv/vedha/tools/uv-python
